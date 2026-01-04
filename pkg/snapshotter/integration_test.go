@@ -68,16 +68,13 @@ func TestNewSnapshotter(t *testing.T) {
 		}
 		defer s.Close()
 
-		// Verify metadata database was created
-		dbPath := filepath.Join(root, "metadata.db")
-		if _, err := os.Stat(dbPath); err != nil {
-			t.Errorf("metadata.db not created: %v", err)
-		}
-
-		// Verify snapshots directory was created
-		snapDir := filepath.Join(root, "snapshots")
-		if _, err := os.Stat(snapDir); err != nil {
-			t.Errorf("snapshots directory not created: %v", err)
+		// Verify snapshotter is functional by calling Walk
+		ctx := t.Context()
+		err = s.Walk(ctx, func(_ context.Context, _ snapshots.Info) error {
+			return nil
+		})
+		if err != nil {
+			t.Errorf("Walk failed on new snapshotter: %v", err)
 		}
 	})
 
@@ -117,7 +114,7 @@ func TestNewSnapshotter(t *testing.T) {
 
 func TestSnapshotterPrepare(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("creates snapshot without parent", func(t *testing.T) {
 		mounts, err := s.Prepare(ctx, "test-1", "")
@@ -171,7 +168,7 @@ func TestSnapshotterPrepare(t *testing.T) {
 
 func TestSnapshotterRemove(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("removes active snapshot", func(t *testing.T) {
 		_, err := s.Prepare(ctx, "to-remove", "")
@@ -200,7 +197,7 @@ func TestSnapshotterRemove(t *testing.T) {
 
 func TestSnapshotterMounts(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("returns mounts for active snapshot", func(t *testing.T) {
 		_, err := s.Prepare(ctx, "mount-test", "")
@@ -228,7 +225,7 @@ func TestSnapshotterMounts(t *testing.T) {
 
 func TestSnapshotterWalk(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Create a few snapshots
 	for _, key := range []string{"walk-1", "walk-2", "walk-3"} {
@@ -255,7 +252,7 @@ func TestSnapshotterWalk(t *testing.T) {
 
 func TestSnapshotterUsage(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, err := s.Prepare(ctx, "usage-test", "")
 	if err != nil {
@@ -275,7 +272,7 @@ func TestSnapshotterUsage(t *testing.T) {
 
 func TestSnapshotterUpdate(t *testing.T) {
 	s := newTestSnapshotter(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, err := s.Prepare(ctx, "update-test", "")
 	if err != nil {
