@@ -17,9 +17,14 @@
 package erofsutils
 
 import (
+	"archive/tar"
+	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
 
@@ -285,4 +290,348 @@ func TestConstants(t *testing.T) {
 	if LayerBlobFilename != "layer.erofs" {
 		t.Errorf("LayerBlobFilename = %q, want %q", LayerBlobFilename, "layer.erofs")
 	}
+}
+
+func TestBuildTarErofsArgs(t *testing.T) {
+	tests := []struct {
+		name          string
+		layerPath     string
+		uuid          string
+		mkfsExtraOpts []string
+		wantArgs      []string
+	}{
+		{
+			name:          "basic without uuid",
+			layerPath:     "/path/to/layer.erofs",
+			uuid:          "",
+			mkfsExtraOpts: nil,
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "/path/to/layer.erofs", "-"},
+		},
+		{
+			name:          "with uuid",
+			layerPath:     "/path/to/layer.erofs",
+			uuid:          "test-uuid-1234",
+			mkfsExtraOpts: nil,
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-U", "test-uuid-1234", "/path/to/layer.erofs", "-"},
+		},
+		{
+			name:          "with extra options",
+			layerPath:     "/path/to/layer.erofs",
+			uuid:          "",
+			mkfsExtraOpts: []string{"-zlz4hc", "-C65536"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "-C65536", "/path/to/layer.erofs", "-"},
+		},
+		{
+			name:          "with uuid and extra options",
+			layerPath:     "/path/to/layer.erofs",
+			uuid:          "abc-123",
+			mkfsExtraOpts: []string{"-zlz4hc", "12", "-C65536"},
+			wantArgs:      []string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data", "-zlz4hc", "12", "-C65536", "-U", "abc-123", "/path/to/layer.erofs", "-"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildTarErofsArgs(tc.layerPath, tc.uuid, tc.mkfsExtraOpts)
+
+			if len(got) != len(tc.wantArgs) {
+				t.Fatalf("buildTarErofsArgs() returned %d args, want %d\ngot:  %v\nwant: %v",
+					len(got), len(tc.wantArgs), got, tc.wantArgs)
+			}
+
+			for i, arg := range got {
+				if arg != tc.wantArgs[i] {
+					t.Errorf("arg[%d] = %q, want %q\nfull args: %v", i, arg, tc.wantArgs[i], got)
+				}
+			}
+
+			// Critical check: last argument must be "-" to force stdin
+			if got[len(got)-1] != "-" {
+				t.Errorf("last argument must be '-' to force stdin reading, got %q", got[len(got)-1])
+			}
+
+			// Critical check: second-to-last argument must be the layer path
+			if got[len(got)-2] != tc.layerPath {
+				t.Errorf("second-to-last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-2])
+			}
+		})
+	}
+}
+
+func TestBuildTarIndexArgs(t *testing.T) {
+	tests := []struct {
+		name          string
+		layerPath     string
+		mkfsExtraOpts []string
+		wantArgs      []string
+	}{
+		{
+			name:          "basic",
+			layerPath:     "/path/to/layer.erofs",
+			mkfsExtraOpts: nil,
+			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "/path/to/layer.erofs", "-"},
+		},
+		{
+			name:          "with extra options",
+			layerPath:     "/path/to/layer.erofs",
+			mkfsExtraOpts: []string{"-zlz4hc", "-C65536"},
+			wantArgs:      []string{"--tar=i", "--aufs", "--quiet", "-zlz4hc", "-C65536", "/path/to/layer.erofs", "-"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildTarIndexArgs(tc.layerPath, tc.mkfsExtraOpts)
+
+			if len(got) != len(tc.wantArgs) {
+				t.Fatalf("buildTarIndexArgs() returned %d args, want %d\ngot:  %v\nwant: %v",
+					len(got), len(tc.wantArgs), got, tc.wantArgs)
+			}
+
+			for i, arg := range got {
+				if arg != tc.wantArgs[i] {
+					t.Errorf("arg[%d] = %q, want %q\nfull args: %v", i, arg, tc.wantArgs[i], got)
+				}
+			}
+
+			// Critical check: last argument must be "-" to force stdin
+			if got[len(got)-1] != "-" {
+				t.Errorf("last argument must be '-' to force stdin reading, got %q", got[len(got)-1])
+			}
+
+			// Critical check: second-to-last argument must be the layer path
+			if got[len(got)-2] != tc.layerPath {
+				t.Errorf("second-to-last argument must be layer path %q, got %q", tc.layerPath, got[len(got)-2])
+			}
+		})
+	}
+}
+
+// TestStdinArgumentIsPresent verifies that both tar conversion functions
+// include the explicit "-" argument to read from stdin. This is critical
+// because without it, mkfs.erofs 1.8+ may fall back to using the output
+// file as the tar input source, causing "failed to open tar file" errors.
+func TestStdinArgumentIsPresent(t *testing.T) {
+	t.Run("ConvertTarErofs args end with stdin marker", func(t *testing.T) {
+		args := buildTarErofsArgs("/any/path.erofs", "some-uuid", []string{"-z", "lz4"})
+
+		if len(args) < 2 {
+			t.Fatal("args too short")
+		}
+
+		// The pattern must be: ... FILE -
+		if args[len(args)-1] != "-" {
+			t.Errorf("stdin marker '-' must be the last argument, got args: %v", args)
+		}
+		if args[len(args)-2] != "/any/path.erofs" {
+			t.Errorf("output file must be second-to-last, got args: %v", args)
+		}
+	})
+
+	t.Run("GenerateTarIndex args end with stdin marker", func(t *testing.T) {
+		args := buildTarIndexArgs("/any/path.erofs", []string{"-z", "lz4"})
+
+		if len(args) < 2 {
+			t.Fatal("args too short")
+		}
+
+		// The pattern must be: ... FILE -
+		if args[len(args)-1] != "-" {
+			t.Errorf("stdin marker '-' must be the last argument, got args: %v", args)
+		}
+		if args[len(args)-2] != "/any/path.erofs" {
+			t.Errorf("output file must be second-to-last, got args: %v", args)
+		}
+	})
+}
+
+// createTestTar creates a simple tar archive in memory for testing.
+func createTestTar(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	tw := tar.NewWriter(buf)
+
+	// Add a directory
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "testdir/",
+		Mode:     0755,
+		Typeflag: tar.TypeDir,
+		ModTime:  time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to write dir header: %v", err)
+	}
+
+	// Add a file with content
+	content := []byte("Hello, EROFS!")
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "testdir/hello.txt",
+		Mode:     0644,
+		Size:     int64(len(content)),
+		Typeflag: tar.TypeReg,
+		ModTime:  time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to write file header: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("failed to write file content: %v", err)
+	}
+
+	// Add a symlink
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "testdir/link",
+		Linkname: "hello.txt",
+		Mode:     0777,
+		Typeflag: tar.TypeSymlink,
+		ModTime:  time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to write symlink header: %v", err)
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close tar writer: %v", err)
+	}
+
+	return buf
+}
+
+// skipIfNoMkfsErofs skips the test if mkfs.erofs is not available.
+func skipIfNoMkfsErofs(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
+		t.Skip("mkfs.erofs not available, skipping integration test")
+	}
+}
+
+// TestConvertTarErofsIntegration tests the actual conversion of a tar to EROFS.
+// This is an integration test that requires mkfs.erofs to be installed.
+func TestConvertTarErofsIntegration(t *testing.T) {
+	skipIfNoMkfsErofs(t)
+
+	dir := t.TempDir()
+	layerPath := filepath.Join(dir, "layer.erofs")
+
+	tarBuf := createTestTar(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := ConvertTarErofs(ctx, tarBuf, layerPath, "test-uuid", nil)
+	if err != nil {
+		t.Fatalf("ConvertTarErofs failed: %v", err)
+	}
+
+	// Verify the output file exists and has content
+	info, err := os.Stat(layerPath)
+	if err != nil {
+		t.Fatalf("failed to stat output file: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("output file is empty")
+	}
+
+	// Verify it's a valid EROFS image by checking the magic number
+	f, err := os.Open(layerPath)
+	if err != nil {
+		t.Fatalf("failed to open output file: %v", err)
+	}
+	defer f.Close()
+
+	// EROFS magic is at offset 1024, value 0xe0f5e1e2
+	magic := make([]byte, 4)
+	if _, err := f.ReadAt(magic, 1024); err != nil {
+		t.Fatalf("failed to read magic: %v", err)
+	}
+
+	// EROFS magic in little-endian: 0xe2e1f5e0
+	expectedMagic := []byte{0xe2, 0xe1, 0xf5, 0xe0}
+	if !bytes.Equal(magic, expectedMagic) {
+		t.Errorf("invalid EROFS magic: got %x, want %x", magic, expectedMagic)
+	}
+
+	t.Logf("Successfully created EROFS image: %s (%d bytes)", layerPath, info.Size())
+}
+
+// TestConvertTarErofsWithCompression tests conversion with compression options.
+func TestConvertTarErofsWithCompression(t *testing.T) {
+	skipIfNoMkfsErofs(t)
+
+	dir := t.TempDir()
+	layerPath := filepath.Join(dir, "layer.erofs")
+
+	tarBuf := createTestTar(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Test with lz4hc compression (commonly used)
+	err := ConvertTarErofs(ctx, tarBuf, layerPath, "", []string{"-zlz4hc"})
+	if err != nil {
+		t.Fatalf("ConvertTarErofs with compression failed: %v", err)
+	}
+
+	info, err := os.Stat(layerPath)
+	if err != nil {
+		t.Fatalf("failed to stat output file: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("output file is empty")
+	}
+
+	t.Logf("Successfully created compressed EROFS image: %s (%d bytes)", layerPath, info.Size())
+}
+
+// TestGenerateTarIndexAndAppendTarIntegration tests the tar index generation.
+func TestGenerateTarIndexAndAppendTarIntegration(t *testing.T) {
+	skipIfNoMkfsErofs(t)
+
+	// Check if tar index mode is supported
+	supported, err := SupportGenerateFromTar()
+	if err != nil {
+		t.Skipf("cannot check mkfs.erofs capabilities: %v", err)
+	}
+	if !supported {
+		t.Skip("mkfs.erofs does not support --tar option")
+	}
+
+	dir := t.TempDir()
+	layerPath := filepath.Join(dir, "layer.erofs")
+
+	tarBuf := createTestTar(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err = GenerateTarIndexAndAppendTar(ctx, tarBuf, layerPath, nil)
+	if err != nil {
+		t.Fatalf("GenerateTarIndexAndAppendTar failed: %v", err)
+	}
+
+	// Verify the output file exists and has content
+	info, err := os.Stat(layerPath)
+	if err != nil {
+		t.Fatalf("failed to stat output file: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("output file is empty")
+	}
+
+	// The file should contain both the EROFS index and the appended tar
+	// EROFS magic should be at offset 1024
+	f, err := os.Open(layerPath)
+	if err != nil {
+		t.Fatalf("failed to open output file: %v", err)
+	}
+	defer f.Close()
+
+	magic := make([]byte, 4)
+	if _, err := f.ReadAt(magic, 1024); err != nil {
+		t.Fatalf("failed to read magic: %v", err)
+	}
+
+	expectedMagic := []byte{0xe2, 0xe1, 0xf5, 0xe0}
+	if !bytes.Equal(magic, expectedMagic) {
+		t.Errorf("invalid EROFS magic: got %x, want %x", magic, expectedMagic)
+	}
+
+	t.Logf("Successfully created EROFS tar index layer: %s (%d bytes)", layerPath, info.Size())
 }

@@ -33,16 +33,27 @@ import (
 	"github.com/aledbf/nexuserofs/internal/stringutil"
 )
 
+// buildTarErofsArgs constructs the command-line arguments for mkfs.erofs
+// when converting a tar stream to an EROFS image.
+//
+// The arguments follow the pattern: --tar=f --aufs --quiet -Enoinline_data [extraOpts] [-U uuid] FILE -
+// The trailing "-" is critical: it explicitly tells mkfs.erofs to read from stdin,
+// preventing it from falling back to using FILE as the tar input source.
+func buildTarErofsArgs(layerPath, uuid string, mkfsExtraOpts []string) []string {
+	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
+	if uuid != "" {
+		args = append(args, "-U", uuid)
+	}
+	// mkfs.erofs --tar=f expects: FILE [SOURCE]
+	// Pass "-" as SOURCE to explicitly read from stdin.
+	args = append(args, layerPath, "-")
+	return args
+}
+
 // ConvertTarErofs converts a tar stream to an EROFS image.
 // The tar content is read from stdin (r) and written to layerPath.
 func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, mkfsExtraOpts []string) error {
-	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
-	if uuid != "" {
-		args = append(args, []string{"-U", uuid}...)
-	}
-	// mkfs.erofs --tar=f expects: FILE [SOURCE]
-	// When SOURCE is omitted, mkfs.erofs reads from stdin automatically
-	args = append(args, layerPath)
+	args := buildTarErofsArgs(layerPath, uuid, mkfsExtraOpts)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = r
 	out, err := cmd.CombinedOutput()
@@ -51,6 +62,19 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 	}
 	log.G(ctx).Debugf("mkfs.erofs %v: %s", args, stringutil.TruncateOutput(out, 256))
 	return nil
+}
+
+// buildTarIndexArgs constructs the command-line arguments for mkfs.erofs
+// when generating a tar index.
+//
+// The arguments follow the pattern: --tar=i --aufs --quiet [extraOpts] FILE -
+// The trailing "-" is critical: it explicitly tells mkfs.erofs to read from stdin.
+func buildTarIndexArgs(layerPath string, mkfsExtraOpts []string) []string {
+	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
+	// mkfs.erofs --tar=i expects: FILE [SOURCE]
+	// Pass "-" as SOURCE to explicitly read from stdin.
+	args = append(args, layerPath, "-")
+	return args
 }
 
 // GenerateTarIndexAndAppendTar calculates tar index using --tar=i option
@@ -71,11 +95,7 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	// Use TeeReader to process the input once while saving it to disk
 	teeReader := io.TeeReader(r, tarFile)
 
-	// Generate tar index directly to layerPath using --tar=i option
-	// mkfs.erofs --tar=i expects: FILE [SOURCE]
-	// When SOURCE is omitted, mkfs.erofs reads from stdin automatically
-	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
-	args = append(args, layerPath)
+	args := buildTarIndexArgs(layerPath, mkfsExtraOpts)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = teeReader
 	out, err := cmd.CombinedOutput()
