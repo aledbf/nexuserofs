@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 
 	differ "github.com/aledbf/nexuserofs/pkg/differ"
+	"github.com/aledbf/nexuserofs/internal/store"
 	snapshotter "github.com/aledbf/nexuserofs/pkg/snapshotter"
 )
 
@@ -186,7 +187,10 @@ func run(cliCtx *cli.Context) error {
 	}
 	defer client.Close()
 
-	contentStore := client.ContentStore()
+	// Use namespace-aware store to properly handle namespace from gRPC request context.
+	// This is necessary because proxy plugins receive namespace in gRPC metadata,
+	// not from the client's default namespace.
+	contentStore := store.NewNamespaceAwareStore(client, containerdNamespace)
 
 	// Build differ options
 	var differOpts []differ.DifferOpt
