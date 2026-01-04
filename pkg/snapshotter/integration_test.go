@@ -11,6 +11,8 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 )
 
+const osLinux = "linux"
+
 // checkBlockModeRequirements verifies that mkfs.ext4 is available
 // for block mode testing. Returns true if requirements are met.
 func checkBlockModeRequirements(t *testing.T) bool {
@@ -27,7 +29,7 @@ func newTestSnapshotter(t *testing.T, opts ...Opt) snapshots.Snapshotter {
 
 	// On non-Linux, we need block mode (default is 64MB)
 	// On Linux without EROFS kernel support, we also need block mode
-	needsBlockMode := runtime.GOOS != "linux"
+	needsBlockMode := runtime.GOOS != osLinux
 	if needsBlockMode {
 		if !checkBlockModeRequirements(t) {
 			t.Skip("mkfs.ext4 not available, required for block mode testing")
@@ -39,7 +41,7 @@ func newTestSnapshotter(t *testing.T, opts ...Opt) snapshots.Snapshotter {
 	s, err := NewSnapshotter(root, opts...)
 	if err != nil {
 		// On Linux, this may fail if EROFS isn't available
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == osLinux {
 			t.Skipf("snapshotter creation failed (EROFS likely not available): %v", err)
 		}
 		t.Fatalf("failed to create snapshotter: %v", err)
@@ -95,7 +97,7 @@ func TestNewSnapshotter(t *testing.T) {
 	})
 
 	t.Run("immutable option rejected on non-linux", func(t *testing.T) {
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == osLinux {
 			t.Skip("only applies to non-Linux")
 		}
 		if !checkBlockModeRequirements(t) {
