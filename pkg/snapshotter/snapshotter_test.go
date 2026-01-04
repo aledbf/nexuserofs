@@ -17,6 +17,8 @@
 package erofs
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -137,4 +139,214 @@ func TestIsExtractSnapshot(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnsureMarkerFile(t *testing.T) {
+	t.Run("creates new file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "marker")
+
+		err := ensureMarkerFile(path)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify file exists
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("marker file not created: %v", err)
+		}
+	})
+
+	t.Run("is idempotent", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "marker")
+
+		// Create first time
+		if err := ensureMarkerFile(path); err != nil {
+			t.Fatalf("first call failed: %v", err)
+		}
+
+		// Create second time - should not error
+		if err := ensureMarkerFile(path); err != nil {
+			t.Errorf("second call failed: %v", err)
+		}
+	})
+
+	t.Run("fails if parent directory does not exist", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nonexistent", "marker")
+
+		err := ensureMarkerFile(path)
+		if err == nil {
+			t.Error("expected error for non-existent parent directory")
+		}
+	})
+
+	t.Run("creates empty file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "marker")
+
+		if err := ensureMarkerFile(path); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("failed to stat marker: %v", err)
+		}
+		if info.Size() != 0 {
+			t.Errorf("marker file should be empty, got size %d", info.Size())
+		}
+	})
+}
+
+func TestSnapshotterOptions(t *testing.T) {
+	t.Run("WithOvlOptions", func(t *testing.T) {
+		config := &SnapshotterConfig{}
+		opt := WithOvlOptions([]string{"metacopy=on", "redirect_dir=on"})
+		opt(config)
+
+		if len(config.ovlOptions) != 2 {
+			t.Errorf("expected 2 options, got %d", len(config.ovlOptions))
+		}
+		if config.ovlOptions[0] != "metacopy=on" {
+			t.Errorf("expected first option to be 'metacopy=on', got %q", config.ovlOptions[0])
+		}
+	})
+
+	t.Run("WithFsverity", func(t *testing.T) {
+		config := &SnapshotterConfig{}
+		opt := WithFsverity()
+		opt(config)
+
+		if !config.enableFsverity {
+			t.Error("expected fsverity to be enabled")
+		}
+	})
+
+	t.Run("WithImmutable", func(t *testing.T) {
+		config := &SnapshotterConfig{}
+		opt := WithImmutable()
+		opt(config)
+
+		if !config.setImmutable {
+			t.Error("expected immutable to be enabled")
+		}
+	})
+
+	t.Run("WithDefaultSize", func(t *testing.T) {
+		config := &SnapshotterConfig{}
+		opt := WithDefaultSize(1024 * 1024 * 100) // 100MB
+		opt(config)
+
+		if config.defaultSize != 100*1024*1024 {
+			t.Errorf("expected defaultSize to be 100MB, got %d", config.defaultSize)
+		}
+	})
+
+	t.Run("WithFsMergeThreshold", func(t *testing.T) {
+		config := &SnapshotterConfig{}
+		opt := WithFsMergeThreshold(5)
+		opt(config)
+
+		if config.fsMergeThreshold != 5 {
+			t.Errorf("expected fsMergeThreshold to be 5, got %d", config.fsMergeThreshold)
+		}
+	})
+}
+
+func TestSnapshotterIsBlockMode(t *testing.T) {
+	tests := []struct {
+		name            string
+		defaultWritable int64
+		want            bool
+	}{
+		{
+			name:            "zero means directory mode",
+			defaultWritable: 0,
+			want:            false,
+		},
+		{
+			name:            "positive means block mode",
+			defaultWritable: 1024 * 1024,
+			want:            true,
+		},
+		{
+			name:            "negative treated as not block mode",
+			defaultWritable: -1,
+			want:            false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &snapshotter{defaultWritable: tc.defaultWritable}
+			got := s.isBlockMode()
+			if got != tc.want {
+				t.Errorf("isBlockMode() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotterPaths(t *testing.T) {
+	root := "/var/lib/containerd/io.containerd.snapshotter.v1.erofs"
+	s := &snapshotter{root: root}
+
+	t.Run("upperPath", func(t *testing.T) {
+		got := s.upperPath("123")
+		want := filepath.Join(root, "snapshots", "123", "fs")
+		if got != want {
+			t.Errorf("upperPath(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("upperDir non-block mode", func(t *testing.T) {
+		s := &snapshotter{root: root, defaultWritable: 0}
+		got := s.upperDir("123")
+		want := filepath.Join(root, "snapshots", "123", "fs")
+		if got != want {
+			t.Errorf("upperDir(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("upperDir block mode", func(t *testing.T) {
+		s := &snapshotter{root: root, defaultWritable: 1024}
+		got := s.upperDir("123")
+		want := filepath.Join(root, "snapshots", "123", "fs", "rw", "upper")
+		if got != want {
+			t.Errorf("upperDir(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("workPath", func(t *testing.T) {
+		got := s.workPath("123")
+		want := filepath.Join(root, "snapshots", "123", "work")
+		if got != want {
+			t.Errorf("workPath(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("writablePath", func(t *testing.T) {
+		got := s.writablePath("123")
+		want := filepath.Join(root, "snapshots", "123", "rwlayer.img")
+		if got != want {
+			t.Errorf("writablePath(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("layerBlobPath", func(t *testing.T) {
+		got := s.layerBlobPath("123")
+		want := filepath.Join(root, "snapshots", "123", "layer.erofs")
+		if got != want {
+			t.Errorf("layerBlobPath(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("fsMetaPath", func(t *testing.T) {
+		got := s.fsMetaPath("123")
+		want := filepath.Join(root, "snapshots", "123", "fsmeta.erofs")
+		if got != want {
+			t.Errorf("fsMetaPath(123) = %q, want %q", got, want)
+		}
+	})
 }
