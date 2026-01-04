@@ -1,6 +1,6 @@
 [Unit]
 Description=EROFS Snapshotter for containerd
-Documentation=https://github.com/containerd/erofs-snapshotter
+Documentation=https://github.com/aledbf/nexuserofs
 After=network.target
 
 [Service]

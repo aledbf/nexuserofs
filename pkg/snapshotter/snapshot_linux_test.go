@@ -45,8 +45,8 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/containerd/erofs-snapshotter/internal/mountutils"
-	erofsdiffer "github.com/containerd/erofs-snapshotter/pkg/differ"
+	"github.com/aledbf/nexuserofs/internal/mountutils"
+	erofsdiffer "github.com/aledbf/nexuserofs/pkg/differ"
 	bolt "go.etcd.io/bbolt"
 )
 

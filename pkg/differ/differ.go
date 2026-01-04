@@ -34,7 +34,7 @@ import (
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
-	erofsutils "github.com/containerd/erofs-snapshotter/pkg/erofs"
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 	"github.com/google/uuid"
 )
 

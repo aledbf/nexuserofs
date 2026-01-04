@@ -30,7 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/mount"
-	erofsutils "github.com/containerd/erofs-snapshotter/pkg/erofs"
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 )
 
 // defaultWritableSize is set to 0 for Linux to match the default behavior of

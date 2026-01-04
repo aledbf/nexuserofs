@@ -35,7 +35,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
-	"github.com/containerd/erofs-snapshotter/internal/fsverity"
+	"github.com/aledbf/nexuserofs/internal/fsverity"
 )
 
 // SnapshotterConfig is used to configure the erofs snapshotter instance

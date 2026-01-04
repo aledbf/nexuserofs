@@ -1,4 +1,4 @@
-module github.com/containerd/erofs-snapshotter
+module github.com/aledbf/nexuserofs
 
 go 1.24.3
 

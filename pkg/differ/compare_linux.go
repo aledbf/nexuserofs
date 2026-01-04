@@ -36,9 +36,9 @@ import (
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/containerd/containerd/v2/pkg/labels"
-	"github.com/containerd/erofs-snapshotter/internal/cleanup"
-	"github.com/containerd/erofs-snapshotter/internal/mountutils"
-	erofsutils "github.com/containerd/erofs-snapshotter/pkg/erofs"
+	"github.com/aledbf/nexuserofs/internal/cleanup"
+	"github.com/aledbf/nexuserofs/internal/mountutils"
+	erofsutils "github.com/aledbf/nexuserofs/pkg/erofs"
 )
 
 // diffWriteFunc is a function that writes diff content to the provided writer.

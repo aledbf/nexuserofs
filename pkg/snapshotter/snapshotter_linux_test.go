@@ -58,7 +58,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/archive/tartest"
 	"github.com/containerd/containerd/v2/pkg/testutil"
-	"github.com/containerd/erofs-snapshotter/internal/fsverity"
+	"github.com/aledbf/nexuserofs/internal/fsverity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
