@@ -63,3 +63,11 @@ func upperDirectoryPermission(p, parent string) error {
 func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
 	return errdefs.ErrNotImplemented
 }
+
+func mountErofsWithLoop(backingFile, mountPoint, serialID string) (string, error) {
+	return "", errdefs.ErrNotImplemented
+}
+
+func unmountAndDetachLoop(mountPoint string) error {
+	return nil
+}

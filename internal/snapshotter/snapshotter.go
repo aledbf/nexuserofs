@@ -586,16 +586,12 @@ func (s *snapshotter) mountErofsLayers(snap storage.Snapshot) ([]string, error) 
 			return nil, fmt.Errorf("failed to check mount status for %s: %w", mountPoint, err)
 		}
 		if !alreadyMounted {
-			// Mount the EROFS layer
-			m := mount.Mount{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			}
-			if err := m.Mount(mountPoint); err != nil {
+			// Mount the EROFS layer with a serial number for udev identification.
+			// Serial format: erofs-<parentID> (e.g., "erofs-42")
+			if _, err := mountErofsWithLoop(layerBlob, mountPoint, parentID); err != nil {
 				// Best-effort cleanup of already mounted layers
 				for j := i - 1; j >= 0; j-- {
-					_ = mount.UnmountAll(filepath.Join(lowerRoot, fmt.Sprintf("%d", j)), 0)
+					_ = unmountAndDetachLoop(filepath.Join(lowerRoot, fmt.Sprintf("%d", j)))
 				}
 				return nil, fmt.Errorf("failed to mount layer %s: %w", layerBlob, err)
 			}
