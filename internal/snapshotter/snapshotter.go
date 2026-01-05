@@ -358,12 +358,35 @@ func (s *snapshotter) prepareDirectory(snapshotDir string, kind snapshots.Kind) 
 	return td, nil
 }
 
-func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, bool) {
-	// fsmeta mounting is disabled because the kernel EROFS driver's device=
-	// option requires pre-setup loop devices, not file paths. The fsmeta files
-	// are still generated for potential future use (e.g., when containerd's
-	// mount manager gains support for setting up multi-device EROFS mounts).
-	return mount.Mount{}, false
+func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
+	// fsmeta requires at least 2 layers to be useful
+	if len(snap.ParentIDs) < 2 {
+		return mount.Mount{}, false
+	}
+
+	// fsmeta is stored on the first (newest) parent
+	fsmetaPath := s.fsMetaPath(snap.ParentIDs[0])
+	fi, err := os.Stat(fsmetaPath)
+	if err != nil || fi.Size() == 0 {
+		// fsmeta doesn't exist or is empty (placeholder from failed generation)
+		return mount.Mount{}, false
+	}
+
+	// Build device= options for each layer blob (skip first - it's referenced in fsmeta)
+	// ParentIDs are ordered newest to oldest, so we iterate from index 1 onwards
+	opts := []string{"ro"}
+	for i := 1; i < len(snap.ParentIDs); i++ {
+		blob := s.layerBlobPath(snap.ParentIDs[i])
+		if _, err := os.Stat(blob); err == nil {
+			opts = append(opts, "device="+blob)
+		}
+	}
+
+	return mount.Mount{
+		Source:  fsmetaPath,
+		Type:    "erofs",
+		Options: opts,
+	}, true
 }
 
 // mounts returns mount specifications for a snapshot.
@@ -538,7 +561,7 @@ func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error
 func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	// Check if we have a merged fsmeta that collapses all layers into one
 	if s.fsMergeThreshold > 0 {
-		if m, ok := s.mountFsMeta(snap, 0); ok {
+		if m, ok := s.mountFsMeta(snap); ok {
 			return []mount.Mount{m}, nil
 		}
 	}
