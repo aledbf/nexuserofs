@@ -50,7 +50,7 @@ type SnapshotterConfig struct {
 	setImmutable bool
 	// defaultSize is the size in bytes of the ext4 writable layer (must be > 0)
 	defaultSize int64
-	// fsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
+	// fsMergeThreshold is the layer count threshold for triggering fsmerge (must be >= 5)
 	fsMergeThreshold uint
 }
 
@@ -86,7 +86,8 @@ func WithDefaultSize(size int64) Opt {
 	}
 }
 
-// WithFsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
+// WithFsMergeThreshold sets the layer count threshold for triggering fsmerge.
+// Must be >= 5. Layers are merged when count exceeds this threshold.
 func WithFsMergeThreshold(v uint) Opt {
 	return func(config *SnapshotterConfig) {
 		config.fsMergeThreshold = v
@@ -117,7 +118,8 @@ const extractLabel = "containerd.io/snapshot/erofs.extract"
 // are stored under the provided root. A metadata file is stored under the root.
 func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	config := SnapshotterConfig{
-		defaultSize: defaultWritableSize,
+		defaultSize:      defaultWritableSize,
+		fsMergeThreshold: 5, // Minimum threshold for layer merging
 	}
 	for _, opt := range opts {
 		opt(&config)
@@ -129,6 +131,10 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 
 	if config.defaultSize <= 0 {
 		return nil, fmt.Errorf("default_writable_size must be > 0, got %d", config.defaultSize)
+	}
+
+	if config.fsMergeThreshold < 5 {
+		return nil, fmt.Errorf("fs_merge_threshold must be >= 5, got %d", config.fsMergeThreshold)
 	}
 
 	if err := checkCompatibility(root); err != nil {

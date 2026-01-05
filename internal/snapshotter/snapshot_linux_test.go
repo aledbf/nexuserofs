@@ -287,9 +287,9 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 
 	tempDir := t.TempDir()
 
-	// Create snapshotter with fsMergeThreshold=2 to trigger merge with just 3 layers
+	// Create snapshotter with fsMergeThreshold=5 to trigger merge with 6 layers
 	snapshotRoot := filepath.Join(tempDir, "snapshots")
-	s, err := NewSnapshotter(snapshotRoot, WithFsMergeThreshold(2))
+	s, err := NewSnapshotter(snapshotRoot, WithFsMergeThreshold(5))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,9 +300,9 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 		t.Fatal("failed to cast snapshotter to *snapshotter")
 	}
 
-	// Create 3 layers to exceed the threshold and trigger fsmeta generation
+	// Create 6 layers to exceed the threshold and trigger fsmeta generation
 	var parentKey string
-	for i := range 3 {
+	for i := range 6 {
 		key := fmt.Sprintf("layer-%d", i)
 		commitKey := fmt.Sprintf("layer-%d-commit", i)
 
@@ -328,7 +328,7 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 	// Check if fsmeta was generated for the top layer
 	var topID string
 	if err := snap.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		topID, _, _, err = storage.GetInfo(ctx, "layer-2-commit")
+		topID, _, _, err = storage.GetInfo(ctx, "layer-5-commit")
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -847,11 +847,11 @@ func TestErofsBlockModeIgnoresFsMerge(t *testing.T) {
 	tempDir := t.TempDir()
 	snapshotRoot := filepath.Join(tempDir, "snapshots")
 
-	// Create snapshotter with both block mode AND fsMergeThreshold
-	// Block mode should take precedence and ignore fsMerge
+	// Create snapshotter with fsMergeThreshold configured
+	// Block mode ignores fsMerge (mounts layers individually)
 	s, err := NewSnapshotter(snapshotRoot,
-		WithDefaultSize(64*1024*1024), // Enable block mode
-		WithFsMergeThreshold(1),       // Would normally enable fsMerge after 1 layer
+		WithDefaultSize(64*1024*1024),
+		WithFsMergeThreshold(5),
 	)
 	if err != nil {
 		t.Fatal(err)
