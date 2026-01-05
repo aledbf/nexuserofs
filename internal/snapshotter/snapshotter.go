@@ -328,6 +328,10 @@ func (s *snapshotter) fsMetaPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "fsmeta.erofs")
 }
 
+func (s *snapshotter) vmdkPath(id string) string {
+	return filepath.Join(s.root, "snapshots", id, "merged.vmdk")
+}
+
 func (s *snapshotter) lowerPath(id string) (string, error) {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
@@ -364,28 +368,20 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 		return mount.Mount{}, false
 	}
 
-	// fsmeta is stored on the first (newest) parent
-	fsmetaPath := s.fsMetaPath(snap.ParentIDs[0])
-	fi, err := os.Stat(fsmetaPath)
+	// Check for VMDK descriptor (generated alongside fsmeta)
+	vmdkFile := s.vmdkPath(snap.ParentIDs[0])
+	fi, err := os.Stat(vmdkFile)
 	if err != nil || fi.Size() == 0 {
-		// fsmeta doesn't exist or is empty (placeholder from failed generation)
+		// VMDK doesn't exist - fall back to individual layer mounts
 		return mount.Mount{}, false
 	}
 
-	// Build device= options for each layer blob (skip first - it's referenced in fsmeta)
-	// ParentIDs are ordered newest to oldest, so we iterate from index 1 onwards
-	opts := []string{"ro"}
-	for i := 1; i < len(snap.ParentIDs); i++ {
-		blob := s.layerBlobPath(snap.ParentIDs[i])
-		if _, err := os.Stat(blob); err == nil {
-			opts = append(opts, "device="+blob)
-		}
-	}
-
+	// Return VMDK path - it contains references to fsmeta + all layer blobs.
+	// qemubox will detect .vmdk extension and pass it to QEMU as a single device.
 	return mount.Mount{
-		Source:  fsmetaPath,
+		Source:  vmdkFile,
 		Type:    "erofs",
-		Options: opts,
+		Options: []string{"ro"},
 	}, true
 }
 
@@ -862,7 +858,9 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 		blobs = append(blobs, blob)
 	}
 	tmpMergedMeta := mergedMeta + ".tmp"
-	args := append([]string{"--aufs", "--ovlfs-strip=1", "--quiet", tmpMergedMeta}, blobs...)
+	// Use rebuild mode (no --aufs) to generate flatdev fsmeta with mapped_blkaddr.
+	// This allows qemubox to consolidate layers into a single VMDK device.
+	args := append([]string{"--quiet", tmpMergedMeta}, blobs...)
 	log.G(ctx).Infof("merging layers with mkfs.erofs %v", args)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
@@ -875,9 +873,21 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 		log.G(ctx).Errorf("failed to rename fsmeta: %v", err)
 		return
 	}
+
+	// Generate VMDK descriptor that references fsmeta + all layer blobs.
+	// This allows QEMU to present them as a single concatenated block device.
+	vmdkFile := s.vmdkPath(snapIDs[0])
+	vmdkDevices := append([]string{mergedMeta}, blobs...)
+	if err = erofsutils.WriteVMDKDescriptorToFile(vmdkFile, vmdkDevices); err != nil {
+		log.G(ctx).Errorf("failed to generate VMDK descriptor: %v", err)
+		// Clean up fsmeta since VMDK generation failed
+		_ = os.Remove(mergedMeta)
+		return
+	}
+
 	log.G(ctx).WithFields(log.Fields{
 		"d": time.Since(t1),
-	}).Infof("merged fsmeta for %v generated", snapIDs[0])
+	}).Infof("merged fsmeta and vmdk for %v generated", snapIDs[0])
 }
 
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
