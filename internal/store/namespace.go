@@ -29,6 +29,21 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+// storeProvider is an internal interface for providing the underlying content store.
+// This allows for testing without requiring a real containerd client.
+type storeProvider interface {
+	ContentStore() content.Store
+}
+
+// clientStoreProvider wraps a containerd client to implement storeProvider.
+type clientStoreProvider struct {
+	client *containerd.Client
+}
+
+func (p *clientStoreProvider) ContentStore() content.Store {
+	return p.client.ContentStore()
+}
+
 // NamespaceAwareStore wraps a containerd client to provide a content.Store
 // that extracts the namespace from each request's context.
 //
@@ -36,7 +51,7 @@ import (
 // the containerd client is created with a default namespace, but incoming
 // gRPC requests contain the actual namespace in the context metadata.
 type NamespaceAwareStore struct {
-	client           *containerd.Client
+	provider         storeProvider
 	defaultNamespace string
 }
 
@@ -44,7 +59,16 @@ type NamespaceAwareStore struct {
 // The defaultNamespace is used when the context doesn't contain a namespace.
 func NewNamespaceAwareStore(client *containerd.Client, defaultNamespace string) *NamespaceAwareStore {
 	return &NamespaceAwareStore{
-		client:           client,
+		provider:         &clientStoreProvider{client: client},
+		defaultNamespace: defaultNamespace,
+	}
+}
+
+// newNamespaceAwareStoreWithProvider creates a NamespaceAwareStore with a custom
+// store provider. This is primarily used for testing.
+func newNamespaceAwareStoreWithProvider(provider storeProvider, defaultNamespace string) *NamespaceAwareStore {
+	return &NamespaceAwareStore{
+		provider:         provider,
 		defaultNamespace: defaultNamespace,
 	}
 }
@@ -66,7 +90,7 @@ func (s *NamespaceAwareStore) getNamespacedContext(ctx context.Context) (context
 
 // store returns the underlying content store.
 func (s *NamespaceAwareStore) store() content.Store {
-	return s.client.ContentStore()
+	return s.provider.ContentStore()
 }
 
 // ReaderAt implements content.Provider.

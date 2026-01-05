@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	// Import testutil to register the -test.root flag
 	_ "github.com/aledbf/nexuserofs/internal/testutil"
@@ -285,4 +286,103 @@ func (m *mockMountManager) Update(_ context.Context, _ mount.ActivationInfo, _ .
 
 func (m *mockMountManager) List(_ context.Context, _ ...string) ([]mount.ActivationInfo, error) {
 	return nil, nil
+}
+
+func TestApplyErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fails with unsupported media type", func(t *testing.T) {
+		d := NewErofsDiffer(nil)
+		desc := ocispec.Descriptor{
+			MediaType: "application/unsupported-type",
+			Digest:    "sha256:abc123",
+			Size:      100,
+		}
+		mounts := []mount.Mount{{Type: "bind", Source: "/some/path"}}
+
+		_, err := d.Apply(ctx, desc, mounts)
+		if err == nil {
+			t.Error("expected error for unsupported media type")
+		}
+		if !strings.Contains(err.Error(), "unsupported media type") {
+			t.Errorf("error should mention unsupported media type: %v", err)
+		}
+	})
+
+	t.Run("fails with empty mounts", func(t *testing.T) {
+		d := NewErofsDiffer(nil)
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    "sha256:abc123",
+			Size:      100,
+		}
+
+		_, err := d.Apply(ctx, desc, nil)
+		if err == nil {
+			t.Error("expected error for empty mounts")
+		}
+	})
+
+	t.Run("fails with invalid mount type for EROFS differ", func(t *testing.T) {
+		d := NewErofsDiffer(nil)
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    "sha256:abc123",
+			Size:      100,
+		}
+		// Use a mount type that won't pass MountsToLayer validation
+		mounts := []mount.Mount{{Type: "tmpfs", Source: "tmpfs"}}
+
+		_, err := d.Apply(ctx, desc, mounts)
+		if err == nil {
+			t.Error("expected error for invalid mount type")
+		}
+	})
+
+	t.Run("fails when layer marker is missing", func(t *testing.T) {
+		d := NewErofsDiffer(nil)
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    "sha256:abc123def456",
+			Size:      100,
+		}
+		// Create a temp directory WITHOUT the marker file
+		tmpDir := t.TempDir()
+		layerBlob := tmpDir + "/layer.erofs"
+
+		mounts := []mount.Mount{{Type: "bind", Source: layerBlob}}
+
+		_, err := d.Apply(ctx, desc, mounts)
+		if err == nil {
+			t.Error("expected error when layer marker is missing")
+		}
+	})
+}
+
+func TestApplySupportedMediaTypes(t *testing.T) {
+	// Test that the Apply method recognizes all expected media types
+	supportedTypes := []string{
+		ocispec.MediaTypeImageLayer,           // uncompressed tar
+		ocispec.MediaTypeImageLayerGzip,       // gzip compressed
+		ocispec.MediaTypeImageLayerZstd,       // zstd compressed
+		"application/vnd.oci.image.layer.erofs", // native EROFS
+	}
+
+	for _, mediaType := range supportedTypes {
+		t.Run(mediaType, func(t *testing.T) {
+			d := NewErofsDiffer(nil)
+			desc := ocispec.Descriptor{
+				MediaType: mediaType,
+				Digest:    "sha256:abc123",
+				Size:      100,
+			}
+
+			// We expect this to fail later (e.g., empty mounts, nil store),
+			// but NOT with "unsupported media type"
+			_, err := d.Apply(context.Background(), desc, nil)
+			if err != nil && strings.Contains(err.Error(), "unsupported media type") {
+				t.Errorf("media type %q should be supported but got: %v", mediaType, err)
+			}
+		})
+	}
 }
