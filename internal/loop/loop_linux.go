@@ -45,25 +45,43 @@ func Setup(backingFile string, cfg Config) (*Device, error) {
 	}
 	defer unix.Close(ctlFd)
 
-	devNum, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(ctlFd), loopCtlGetFree, 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("LOOP_CTL_GET_FREE failed: %w", errno)
-	}
+	// Retry loop for acquiring a free device (handles race with recently released devices)
+	const maxRetries = 5
+	var loopPath string
+	var loopFd int
+	var devNum uintptr
 
-	loopPath := fmt.Sprintf("/dev/loop%d", devNum)
+	for attempt := range maxRetries {
+		var errno unix.Errno
+		devNum, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(ctlFd), loopCtlGetFree, 0)
+		if errno != 0 {
+			return nil, fmt.Errorf("LOOP_CTL_GET_FREE failed: %w", errno)
+		}
 
-	// Open the loop device
-	loopFd, err := unix.Open(loopPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open loop device %s: %w", loopPath, err)
-	}
-	defer unix.Close(loopFd)
+		loopPath = fmt.Sprintf("/dev/loop%d", devNum)
 
-	// Associate the loop device with the backing file
-	_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopSetFd, uintptr(backingFd))
-	if errno != 0 {
+		// Open the loop device
+		loopFd, err = unix.Open(loopPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open loop device %s: %w", loopPath, err)
+		}
+
+		// Associate the loop device with the backing file
+		_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopSetFd, uintptr(backingFd))
+		if errno == 0 {
+			break // Success
+		}
+
+		unix.Close(loopFd)
+
+		if errno == unix.EBUSY && attempt < maxRetries-1 {
+			// Device was grabbed by another process, try again
+			continue
+		}
+
 		return nil, fmt.Errorf("LOOP_SET_FD failed for %s: %w", loopPath, errno)
 	}
+	defer unix.Close(loopFd)
 
 	// Build flags
 	var info LoopInfo64
@@ -81,11 +99,11 @@ func Setup(backingFile string, cfg Config) (*Device, error) {
 
 	// Set loop device status
 	//nolint:gosec // G103: unsafe.Pointer required for ioctl syscall with kernel struct
-	_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopSetStatus64, uintptr(unsafe.Pointer(&info)))
-	if errno != 0 {
+	_, _, statusErrno := unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopSetStatus64, uintptr(unsafe.Pointer(&info)))
+	if statusErrno != 0 {
 		// Clean up on failure (ignore error, we're already returning one)
 		_, _, _ = unix.Syscall(unix.SYS_IOCTL, uintptr(loopFd), loopClrFd, 0)
-		return nil, fmt.Errorf("LOOP_SET_STATUS64 failed for %s: %w", loopPath, errno)
+		return nil, fmt.Errorf("LOOP_SET_STATUS64 failed for %s: %w", loopPath, statusErrno)
 	}
 
 	dev := &Device{
