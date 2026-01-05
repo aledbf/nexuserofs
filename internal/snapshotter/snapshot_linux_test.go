@@ -163,7 +163,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 				t.Fatalf("expected lower mounts to include overlay templates, got: %#v", lowerMounts)
 			}
 		} else {
-			if len(lowerMounts) != 1 || mountutils.TypeSuffix(lowerMounts[0].Type) != "erofs" {
+			if len(lowerMounts) != 1 || mountutils.TypeSuffix(lowerMounts[0].Type) != testTypeErofs {
 				t.Fatalf("expected single EROFS mount, got: %#v", lowerMounts)
 			}
 		}
@@ -353,7 +353,7 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 		// Verify we have EROFS mounts (possibly with device= for multi-device)
 		hasErofs := false
 		for _, m := range viewMounts {
-			if m.Type == "erofs" {
+			if m.Type == testTypeErofs {
 				hasErofs = true
 				t.Logf("found EROFS mount: source=%s, options=%v", m.Source, m.Options)
 			}
@@ -468,12 +468,13 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 
 // TestErofsViewMountsMultiLayer tests that View snapshots with multiple layers
 // return real mountable paths (not templates) that can be used by standard
-// containerd operations like 'nerdctl commit'.
+// containerd operations like 'nerdctl commit' when WithDirectViewMounts() is enabled.
 func TestErofsViewMountsMultiLayer(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	sn := newSnapshotter(t)
+	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
+	sn := newSnapshotter(t, WithDirectViewMounts())
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -614,7 +615,7 @@ func TestErofsViewMountsSingleLayer(t *testing.T) {
 		t.Fatalf("expected single mount, got %d: %#v", len(viewMounts), viewMounts)
 	}
 
-	if viewMounts[0].Type != "erofs" {
+	if viewMounts[0].Type != testTypeErofs {
 		t.Fatalf("expected erofs mount type for single layer, got: %s", viewMounts[0].Type)
 	}
 
@@ -625,12 +626,13 @@ func TestErofsViewMountsSingleLayer(t *testing.T) {
 }
 
 // TestErofsViewMountsCleanupOnRemove tests that View snapshot mounts are properly
-// cleaned up when the snapshot is removed.
+// cleaned up when the snapshot is removed (when directViewMounts is enabled).
 func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	sn := newSnapshotter(t)
+	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
+	sn := newSnapshotter(t, WithDirectViewMounts())
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -710,12 +712,14 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 }
 
 // TestErofsViewMountsIdempotent tests that calling Mounts() multiple times
-// on a View snapshot returns consistent results without re-mounting.
+// on a View snapshot returns consistent results without re-mounting
+// (when directViewMounts is enabled).
 func TestErofsViewMountsIdempotent(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	sn := newSnapshotter(t)
+	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
+	sn := newSnapshotter(t, WithDirectViewMounts())
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
