@@ -256,15 +256,6 @@ func TestSnapshotterOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("WithDirectViewMounts", func(t *testing.T) {
-		config := &SnapshotterConfig{}
-		opt := WithDirectViewMounts()
-		opt(config)
-
-		if !config.directViewMounts {
-			t.Error("expected directViewMounts to be enabled")
-		}
-	})
 }
 
 func TestSnapshotterIsBlockMode(t *testing.T) {

@@ -468,13 +468,13 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 
 // TestErofsViewMountsMultiLayer tests that View snapshots with multiple layers
 // return real mountable paths (not templates) that can be used by standard
-// containerd operations like 'nerdctl commit' when WithDirectViewMounts() is enabled.
+// containerd operations like 'nerdctl commit'.
 func TestErofsViewMountsMultiLayer(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
-	sn := newSnapshotter(t, WithDirectViewMounts())
+	// Direct mounts are now the default - EROFS layers are mounted and real paths returned
+	sn := newSnapshotter(t)
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -626,13 +626,13 @@ func TestErofsViewMountsSingleLayer(t *testing.T) {
 }
 
 // TestErofsViewMountsCleanupOnRemove tests that View snapshot mounts are properly
-// cleaned up when the snapshot is removed (when directViewMounts is enabled).
+// cleaned up when the snapshot is removed.
 func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
-	sn := newSnapshotter(t, WithDirectViewMounts())
+	// Direct mounts are now the default - EROFS layers are mounted and real paths returned
+	sn := newSnapshotter(t)
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -712,14 +712,13 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 }
 
 // TestErofsViewMountsIdempotent tests that calling Mounts() multiple times
-// on a View snapshot returns consistent results without re-mounting
-// (when directViewMounts is enabled).
+// on a View snapshot returns consistent results without re-mounting.
 func TestErofsViewMountsIdempotent(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	// Use WithDirectViewMounts() to enable real mount paths for View snapshots
-	sn := newSnapshotter(t, WithDirectViewMounts())
+	// Direct mounts are now the default - EROFS layers are mounted and real paths returned
+	sn := newSnapshotter(t)
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
