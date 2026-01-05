@@ -52,10 +52,6 @@ type SnapshotterConfig struct {
 	defaultSize int64
 	// fsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
 	fsMergeThreshold uint
-	// directViewMounts enables mounting EROFS layers directly for View snapshots,
-	// returning real paths instead of template-based mounts. This is required for
-	// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
-	directViewMounts bool
 }
 
 // Opt is an option to configure the erofs snapshotter
@@ -96,16 +92,6 @@ func WithFsMergeThreshold(v uint) Opt {
 	}
 }
 
-// WithDirectViewMounts enables mounting EROFS layers directly for View snapshots,
-// returning real paths instead of template-based mounts. This is required for
-// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
-// When disabled (default), View snapshots with multiple layers return template-based
-// mounts that require a mount manager for resolution.
-func WithDirectViewMounts() Opt {
-	return func(config *SnapshotterConfig) {
-		config.directViewMounts = true
-	}
-}
 
 type MetaStore interface {
 	TransactionContext(ctx context.Context, writable bool) (context.Context, storage.Transactor, error)
@@ -121,7 +107,6 @@ type snapshotter struct {
 	setImmutable     bool
 	defaultWritable  int64
 	fsMergeThreshold uint
-	directViewMounts bool
 }
 
 // isBlockMode returns true if the snapshotter uses block-based writable layers
@@ -193,7 +178,6 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		setImmutable:     config.setImmutable,
 		defaultWritable:  config.defaultSize,
 		fsMergeThreshold: config.fsMergeThreshold,
-		directViewMounts: config.directViewMounts,
 	}, nil
 }
 
@@ -331,9 +315,10 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, b
 }
 
 // mounts returns mount specifications for a snapshot.
-// For blockMode active snapshots, it performs actual mounting via activeMounts.
-// For other cases, it returns template-based mount specs for the mount manager.
+// EROFS layers are mounted directly and real overlay paths are returned.
+// This allows standard containerd operations without requiring extra plugins.
 func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
+	// Block mode uses templates (requires mount-manager for ext4 loop mounts)
 	if s.isBlockMode() && snap.Kind == snapshots.KindActive {
 		if isExtractSnapshot(info) {
 			return s.diffMounts(snap)
@@ -341,15 +326,18 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		return s.templateMounts(snap)
 	}
 
-	// For KindView snapshots with multiple layers, optionally mount the layers and
-	// return real paths. This is needed for standard containerd operations like
-	// 'nerdctl commit' that don't use a mount manager that understands template syntax.
-	// When directViewMounts is false (default), templates are returned for use with
-	// mount managers (e.g., differ workflow, VM runtimes).
-	if s.directViewMounts && snap.Kind == snapshots.KindView && len(snap.ParentIDs) > 1 {
-		return s.viewMounts(snap)
+	// For snapshots with parent layers, mount EROFS layers directly
+	// and return overlay mounts with real paths
+	if len(snap.ParentIDs) > 0 {
+		if snap.Kind == snapshots.KindView {
+			return s.viewMounts(snap)
+		}
+		if snap.Kind == snapshots.KindActive && !isExtractSnapshot(info) {
+			return s.activeMounts(snap)
+		}
 	}
 
+	// Fallback to template mounts for edge cases (e.g., extract snapshots)
 	return s.templateMounts(snap)
 }
 
@@ -622,20 +610,30 @@ func (s *snapshotter) viewLowerPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "lower")
 }
 
-// viewMounts mounts EROFS layers and returns a standard overlay mount with real paths.
-// This is used for KindView snapshots with multiple layers, allowing standard containerd
-// operations (like 'nerdctl commit') to mount the snapshot without a special mount manager.
-//
-// The EROFS layers are mounted under <snapshot>/lower/<index> and an overlay is created
-// using these as lowerdir. The mounts are cleaned up when the View snapshot is removed.
-func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+// mountErofsLayers mounts EROFS layers for a snapshot and returns the lowerdir paths.
+// This is a shared helper for viewMounts and activeMounts.
+// The layers are mounted under <snapshot>/lower/<index>.
+func (s *snapshotter) mountErofsLayers(snap storage.Snapshot) ([]string, error) {
 	lowerRoot := s.viewLowerPath(snap.ID)
 
 	// Check if we have a merged fsmeta that collapses all layers into one
 	if s.fsMergeThreshold > 0 {
 		if m, ok := s.mountFsMeta(snap, 0); ok {
-			// Single merged EROFS mount - return directly
-			return []mount.Mount{m}, nil
+			// Single merged EROFS mount - mount it and return the path
+			mountPoint := filepath.Join(lowerRoot, "merged")
+			if err := os.MkdirAll(mountPoint, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create mount point %s: %w", mountPoint, err)
+			}
+			alreadyMounted, err := mountinfo.Mounted(mountPoint)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check mount status for %s: %w", mountPoint, err)
+			}
+			if !alreadyMounted {
+				if err := m.Mount(mountPoint); err != nil {
+					return nil, fmt.Errorf("failed to mount merged layer: %w", err)
+				}
+			}
+			return []string{mountPoint}, nil
 		}
 	}
 
@@ -677,6 +675,21 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 		lowerDirs = append(lowerDirs, mountPoint)
 	}
 
+	return lowerDirs, nil
+}
+
+// viewMounts mounts EROFS layers and returns a standard overlay mount with real paths.
+// This is used for KindView snapshots with multiple layers, allowing standard containerd
+// operations (like 'nerdctl commit') to mount the snapshot without a special mount manager.
+//
+// The EROFS layers are mounted under <snapshot>/lower/<index> and an overlay is created
+// using these as lowerdir. The mounts are cleaned up when the View snapshot is removed.
+func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	lowerDirs, err := s.mountErofsLayers(snap)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the lowerdir option with real paths (newest first for overlay)
 	// Overlay expects lowerdir in order from top to bottom
 	lowerdir := strings.Join(lowerDirs, ":")
@@ -684,6 +697,37 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	options := []string{
 		fmt.Sprintf("lowerdir=%s", lowerdir),
 		"ro",
+	}
+	options = append(options, s.ovlOptions...)
+
+	return []mount.Mount{
+		{
+			Type:    "overlay",
+			Source:  "overlay",
+			Options: options,
+		},
+	}, nil
+}
+
+// activeMounts mounts EROFS layers and returns a writable overlay mount with real paths.
+// This is used for KindActive snapshots when directViewMounts is enabled and not in block mode.
+// It allows standard containerd operations to work without requiring the mount-manager plugin.
+//
+// The EROFS layers are mounted under <snapshot>/lower/<index> and an overlay is created
+// using these as lowerdir with the snapshot's workdir and upperdir for writes.
+func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	lowerDirs, err := s.mountErofsLayers(snap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the lowerdir option with real paths
+	lowerdir := strings.Join(lowerDirs, ":")
+
+	options := []string{
+		fmt.Sprintf("lowerdir=%s", lowerdir),
+		fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
+		fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
 	}
 	options = append(options, s.ovlOptions...)
 
