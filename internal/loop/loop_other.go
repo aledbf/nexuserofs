@@ -44,3 +44,13 @@ func FindByBackingFile(backingFile string) (*Device, error) {
 func FindBySerial(serial string) (*Device, error) {
 	return nil, errdefs.ErrNotImplemented
 }
+
+// FindBySerialPrefix finds all loop devices with serial numbers matching the given prefix.
+func FindBySerialPrefix(prefix string) ([]*Device, error) {
+	return nil, errdefs.ErrNotImplemented
+}
+
+// CleanupBySerialPrefix detaches all loop devices with serial numbers matching the given prefix.
+func CleanupBySerialPrefix(prefix string) (int, error) {
+	return 0, errdefs.ErrNotImplemented
+}

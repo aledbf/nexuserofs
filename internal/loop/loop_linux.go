@@ -19,6 +19,9 @@ const (
 	loopCtlGetFree  = 0x4C82
 )
 
+// loopDevicePrefix is the prefix for loop device names in sysfs.
+const loopDevicePrefix = "loop"
+
 // Setup creates and configures a loop device for the given backing file.
 // Returns the loop device path (e.g., "/dev/loop0").
 func Setup(backingFile string, cfg Config) (*Device, error) {
@@ -202,7 +205,7 @@ func FindByBackingFile(backingFile string) (*Device, error) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if len(name) < 4 || name[:4] != "loop" {
+		if len(name) < len(loopDevicePrefix) || name[:len(loopDevicePrefix)] != loopDevicePrefix {
 			continue
 		}
 
@@ -242,7 +245,7 @@ func FindBySerial(serial string) (*Device, error) {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if len(name) < 4 || name[:4] != "loop" {
+		if len(name) < len(loopDevicePrefix) || name[:len(loopDevicePrefix)] != loopDevicePrefix {
 			continue
 		}
 
@@ -268,4 +271,63 @@ func FindBySerial(serial string) (*Device, error) {
 	}
 
 	return nil, nil
+}
+
+// FindBySerialPrefix finds all loop devices with serial numbers matching the given prefix.
+// Returns an empty slice if no devices are found.
+func FindBySerialPrefix(prefix string) ([]*Device, error) {
+	entries, err := os.ReadDir("/sys/block")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read /sys/block: %w", err)
+	}
+
+	var devices []*Device
+	for _, entry := range entries {
+		name := entry.Name()
+		if len(name) < len(loopDevicePrefix) || name[:len(loopDevicePrefix)] != loopDevicePrefix {
+			continue
+		}
+
+		serialPath := filepath.Join("/sys/block", name, "loop", "serial")
+		data, err := os.ReadFile(serialPath)
+		if err != nil {
+			continue
+		}
+
+		devSerial := string(data)
+		if len(devSerial) > 0 && devSerial[len(devSerial)-1] == '\n' {
+			devSerial = devSerial[:len(devSerial)-1]
+		}
+
+		if len(devSerial) >= len(prefix) && devSerial[:len(prefix)] == prefix {
+			var devNum int
+			_, _ = fmt.Sscanf(name, "loop%d", &devNum)
+			devices = append(devices, &Device{
+				Path:   "/dev/" + name,
+				Number: devNum,
+			})
+		}
+	}
+
+	return devices, nil
+}
+
+// CleanupBySerialPrefix detaches all loop devices with serial numbers matching the given prefix.
+// Returns the number of devices detached and any error encountered.
+// This is useful for cleaning up orphaned test devices.
+func CleanupBySerialPrefix(prefix string) (int, error) {
+	devices, err := FindBySerialPrefix(prefix)
+	if err != nil {
+		return 0, err
+	}
+
+	detached := 0
+	for _, dev := range devices {
+		if err := dev.Detach(); err != nil {
+			return detached, fmt.Errorf("failed to detach %s: %w", dev.Path, err)
+		}
+		detached++
+	}
+
+	return detached, nil
 }

@@ -70,6 +70,15 @@ jobs:
       - name: Load EROFS kernel module
         run: sudo modprobe erofs || true
 
+      - name: Setup udev rules for loop devices
+        run: |
+          # Skip SCSI detection and warnings for all loop devices
+          # Sets ID_SERIAL to prevent the 55-scsi-sg3_id.rules warning
+          sudo tee /etc/udev/rules.d/49-skip-loop-scsi.rules << 'EOF'
+          SUBSYSTEM=="block", KERNEL=="loop*", ENV{ID_SERIAL}="loop", ENV{ID_SCSI}="0", ENV{ID_SCSI_INQUIRY}="0"
+          EOF
+          sudo udevadm control --reload-rules
+
       - name: Run tests as root
         run: |
           sudo env "PATH=$PATH" "GOPATH=$GOPATH" "GOCACHE=$GOCACHE" "GOMODCACHE=$GOMODCACHE" \

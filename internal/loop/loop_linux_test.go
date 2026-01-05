@@ -3,12 +3,62 @@ package loop
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/containerd/containerd/v2/pkg/testutil"
 )
+
+// testSerialPrefix is the prefix used for all test loop device serials.
+// This allows cleanup of orphaned devices from interrupted tests.
+const testSerialPrefix = "erofs-test-"
+
+// TestMain handles test setup and cleanup, including signal handling
+// to clean up loop devices if tests are interrupted.
+func TestMain(m *testing.M) {
+	// Clean up any orphaned loop devices from previous test runs
+	if n, err := CleanupBySerialPrefix(testSerialPrefix); err == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "cleaned up %d orphaned test loop devices\n", n)
+	}
+
+	// Set up signal handler for cleanup on interruption
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Run cleanup in background goroutine if interrupted
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sigChan:
+			fmt.Fprintf(os.Stderr, "\ninterrupted, cleaning up test loop devices...\n")
+			if n, err := CleanupBySerialPrefix(testSerialPrefix); err != nil {
+				fmt.Fprintf(os.Stderr, "cleanup error: %v\n", err)
+			} else if n > 0 {
+				fmt.Fprintf(os.Stderr, "cleaned up %d test loop devices\n", n)
+			}
+			os.Exit(1)
+		case <-done:
+			return
+		}
+	}()
+
+	// Run tests
+	code := m.Run()
+
+	// Stop signal handler
+	close(done)
+	signal.Stop(sigChan)
+
+	// Final cleanup
+	if n, _ := CleanupBySerialPrefix(testSerialPrefix); n > 0 {
+		fmt.Fprintf(os.Stderr, "cleaned up %d test loop devices after tests\n", n)
+	}
+
+	os.Exit(code)
+}
 
 func TestSetupAndDetach(t *testing.T) {
 	testutil.RequiresRoot(t)
