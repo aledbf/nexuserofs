@@ -104,7 +104,6 @@ type snapshotter struct {
 	fsMergeThreshold uint
 }
 
-
 // extractLabel is the label key used to mark snapshots for layer extraction.
 // This is stored in the snapshot metadata for atomic reads within transactions,
 // avoiding TOCTOU race conditions that would occur with filesystem markers.
@@ -325,7 +324,7 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
-func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
+func (s *snapshotter) prepareDirectory(snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
@@ -649,7 +648,7 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}
 
 	snapshotDir := filepath.Join(s.root, "snapshots")
-	td, err = s.prepareDirectory(ctx, snapshotDir, kind)
+	td, err = s.prepareDirectory(snapshotDir, kind)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prepare snapshot dir: %w", err)
 	}

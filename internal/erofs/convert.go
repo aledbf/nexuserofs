@@ -354,51 +354,6 @@ func layerFromUpperdir(upperdir string) string {
 	return parent
 }
 
-// MountsToUpperDir extracts the actual upper content directory from mount specifications.
-// Unlike MountsToLayer which returns the snapshot layer root, this returns the directory
-// where actual file content resides:
-//   - For directory mode: returns .../snapshots/{id}/fs
-//   - For block mode: returns .../snapshots/{id}/rw/upper
-//   - For bind mounts: returns the mount source directly
-//
-// This function is used by the differ when computing diffs between layers.
-func MountsToUpperDir(mounts []mount.Mount) (string, error) {
-	if len(mounts) == 0 {
-		return "", fmt.Errorf("no mounts provided: %w", errdefs.ErrNotImplemented)
-	}
-
-	// mkfs/* mounts generate content at mount time, not applicable for direct access
-	if strings.HasPrefix(mounts[0].Type, "mkfs/") {
-		return "", fmt.Errorf("mkfs mounts require mount manager resolution: %w", errdefs.ErrNotImplemented)
-	}
-
-	mnt := mounts[len(mounts)-1]
-	baseType := mountBaseType(mnt.Type)
-
-	switch baseType {
-	case "bind":
-		// Bind mount source is the actual content directory
-		return mnt.Source, nil
-	case "erofs":
-		// For EROFS mounts, the content is at layer/fs
-		return filepath.Join(filepath.Dir(mnt.Source), "fs"), nil
-	case "overlay":
-		// Extract upperdir directly from overlay options
-		for _, opt := range mnt.Options {
-			key, value, ok := strings.Cut(opt, "=")
-			if !ok {
-				continue
-			}
-			if key == "upperdir" {
-				return value, nil
-			}
-		}
-		return "", fmt.Errorf("overlay mount has no upperdir: %w", errdefs.ErrNotImplemented)
-	default:
-		return "", fmt.Errorf("unsupported filesystem type %q for erofs differ: %w", mnt.Type, errdefs.ErrNotImplemented)
-	}
-}
-
 // SupportGenerateFromTar checks if the installed version of mkfs.erofs supports
 // the tar mode (--tar option).
 func SupportGenerateFromTar() (bool, error) {

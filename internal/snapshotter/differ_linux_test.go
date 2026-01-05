@@ -210,7 +210,7 @@ func (e *differTestEnv) createLayer(key, parentKey, filename, content string) st
 	}
 
 	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
-	filePath := filepath.Join(e.snapshotter.upperPath(id), filename)
+	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
@@ -224,6 +224,7 @@ func (e *differTestEnv) createLayer(key, parentKey, filename, content string) st
 }
 
 // createBlockLayer creates and commits a layer using block mode (ext4 upper).
+// Note: This is now the same as createLayer since block mode is always used.
 func (e *differTestEnv) createBlockLayer(key, parentKey, filename, content string) string {
 	e.t.Helper()
 
@@ -256,7 +257,7 @@ func (e *differTestEnv) prepareActiveLayer(key, parentKey, filename, content str
 	}
 
 	id := snapshotID(e.ctx, e.t, e.snapshotter, key)
-	filePath := filepath.Join(e.snapshotter.upperPath(id), filename)
+	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
@@ -265,6 +266,7 @@ func (e *differTestEnv) prepareActiveLayer(key, parentKey, filename, content str
 }
 
 // prepareActiveBlockLayer prepares an active layer in block mode.
+// Note: This is now the same as prepareActiveLayer since block mode is always used.
 func (e *differTestEnv) prepareActiveBlockLayer(key, parentKey, filename, content string) []mount.Mount {
 	e.t.Helper()
 
@@ -531,9 +533,11 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create whiteout (character device 0:0) in block upper directory
+	// Create whiteout (character device 0:0) in block upper directory.
+	// In overlayfs, whiteouts are char devices 0:0 with the original filename.
+	// The .wh. prefix is only added when converting to tar format.
 	upperID := snapshotID(env.ctx, t, env.snapshotter, testKeyUpper)
-	whiteoutPath := filepath.Join(env.snapshotter.blockUpperPath(upperID), ".wh.gone.txt")
+	whiteoutPath := filepath.Join(env.snapshotter.blockUpperPath(upperID), "gone.txt")
 	if err := unix.Mknod(whiteoutPath, unix.S_IFCHR|0644, 0); err != nil {
 		t.Fatalf("failed to create whiteout: %v", err)
 	}

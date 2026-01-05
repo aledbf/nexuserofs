@@ -262,14 +262,6 @@ func TestSnapshotterPaths(t *testing.T) {
 	root := "/var/lib/containerd/io.containerd.snapshotter.v1.erofs"
 	s := &snapshotter{root: root}
 
-	t.Run("upperPath", func(t *testing.T) {
-		got := s.upperPath("123")
-		want := filepath.Join(root, "snapshots", "123", "fs")
-		if got != want {
-			t.Errorf("upperPath(123) = %q, want %q", got, want)
-		}
-	})
-
 	t.Run("viewLowerPath", func(t *testing.T) {
 		got := s.viewLowerPath("123")
 		want := filepath.Join(root, "snapshots", "123", "lower")

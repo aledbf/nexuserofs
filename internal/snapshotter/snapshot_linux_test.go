@@ -127,7 +127,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			return "", err
 		}
 		id := snapshotID(ctx, t, snap, key)
-		if err := writeFiles(snap.upperPath(id), files); err != nil {
+		if err := writeFiles(snap.blockUpperPath(id), files); err != nil {
 			return "", err
 		}
 		commitKey := key + "-commit"
@@ -172,7 +172,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 		upperID := snapshotID(ctx, t, snap, upperKey)
-		if err := writeFiles(snap.upperPath(upperID), upperFiles); err != nil {
+		if err := writeFiles(snap.blockUpperPath(upperID), upperFiles); err != nil {
 			t.Fatal(err)
 		}
 
@@ -312,7 +312,7 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 
 		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
-		if err := os.WriteFile(filepath.Join(snap.upperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
 			t.Fatalf("failed to write file in layer %d: %v", i, err)
 		}
 
@@ -521,7 +521,7 @@ func TestErofsViewMountsMultiLayer(t *testing.T) {
 
 		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
-		if err := os.WriteFile(filepath.Join(snap.upperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
 			t.Fatalf("failed to write file in layer %d: %v", i, err)
 		}
 
@@ -605,7 +605,7 @@ func TestErofsViewMountsSingleLayer(t *testing.T) {
 	}
 
 	id := snapshotID(ctx, t, snap, key)
-	if err := os.WriteFile(filepath.Join(snap.upperPath(id), "test.txt"), []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), "test.txt"), []byte("test"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -668,7 +668,7 @@ func TestErofsViewMountsCleanupOnRemove(t *testing.T) {
 		}
 
 		id := snapshotID(ctx, t, snap, key)
-		if err := os.WriteFile(filepath.Join(snap.upperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -763,7 +763,7 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		}
 
 		id := snapshotID(ctx, t, snap, key)
-		if err := os.WriteFile(filepath.Join(snap.upperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), fmt.Sprintf("file-%d.txt", i)), []byte("content"), 0644); err != nil {
 			t.Fatal(err)
 		}
 

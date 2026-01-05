@@ -29,7 +29,6 @@ import (
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/epoch"
 	"github.com/containerd/containerd/v2/pkg/labels"
-	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
@@ -42,19 +41,6 @@ import (
 
 // diffWriteFunc is a function that writes diff content to the provided writer.
 type diffWriteFunc func(ctx context.Context, w io.Writer) error
-
-func writeDiff(ctx context.Context, w io.Writer, lower []mount.Mount, upperRoot string, mm mount.Manager) error {
-	var opts []archive.ChangeWriterOpt
-
-	return withLowerMount(ctx, lower, mm, func(lowerRoot string) error {
-		cw := archive.NewChangeWriter(w, upperRoot, opts...)
-		err := fs.DiffDirChanges(ctx, lowerRoot, upperRoot, fs.DiffSourceOverlayFS, cw.HandleChange)
-		if err != nil {
-			return fmt.Errorf("failed to create diff tar stream: %w", err)
-		}
-		return cw.Close()
-	})
-}
 
 func writeDiffFromMounts(ctx context.Context, w io.Writer, lower, upper []mount.Mount, mm mount.Manager) error {
 	return withLowerMount(ctx, lower, mm, func(lowerRoot string) error {
@@ -79,19 +65,12 @@ func (s *ErofsDiff) mountManager() mount.Manager {
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
 //
-// Mount Manager Requirements:
+// This function uses the mount manager to activate both lower and upper mounts,
+// then computes the diff between them. The mount manager handles all mount
+// resolution including templates, formatted mounts, and loop device setup.
 //
-// The mount manager is required when mounts contain templates, format/mkfs/mkdir
-// transformers, or multi-device EROFS mounts. These require runtime resolution
-// that cannot be done with static mount paths. If the mount manager is required
-// but not configured, Compare returns an error with "mount manager is required".
-//
-// The mount manager is NOT required for:
-//   - Single EROFS layer mounts (direct file access)
-//   - Simple bind mounts with the .erofslayer marker
-//   - Empty lower mounts (base layer creation)
-//
-// See also: requiresMountResolution() for the detailed logic.
+// If the mount manager is not configured but mounts require resolution,
+// Compare returns an error with "mount manager is required".
 func (s *ErofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispec.Descriptor, err error) {
 	var config diff.Config
 	for _, opt := range opts {
@@ -111,24 +90,8 @@ func (s *ErofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 	// the mount manager plugin is available
 	mm := s.mountManager()
 
-	// Use mount manager path for mounts that need resolution (templates,
-	// formatted mounts, mkfs, etc). Otherwise use optimized overlay diff.
-	if requiresMountResolution(lower, upper) {
-		return s.writeAndCommitDiff(ctx, config, func(ctx context.Context, w io.Writer) error {
-			return writeDiffFromMounts(ctx, w, lower, upper, mm)
-		})
-	}
-
-	// For direct overlay diff, resolve the upper content directory from mounts.
-	// This returns the actual directory containing files (e.g., layer/fs for directory
-	// mode, or layer/rw/upper for block mode).
-	upperRoot, err := erofsutils.MountsToUpperDir(upper)
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("unsupported layer for erofsDiff Compare method: %w", err)
-	}
-
 	return s.writeAndCommitDiff(ctx, config, func(ctx context.Context, w io.Writer) error {
-		return writeDiff(ctx, w, lower, upperRoot, mm)
+		return writeDiffFromMounts(ctx, w, lower, upper, mm)
 	})
 }
 
@@ -291,7 +254,13 @@ func withLowerMount(ctx context.Context, lower []mount.Mount, mm mount.Manager, 
 // withUpperMount resolves upper mounts and calls f with the resulting root path.
 // If mounts require the mount manager (formatted mounts, templates, or EROFS),
 // it activates them through the mount manager first.
+// Returns ErrNotImplemented if the mounts are not from the EROFS snapshotter.
 func withUpperMount(ctx context.Context, upper []mount.Mount, mm mount.Manager, f func(root string) error) error {
+	// Validate upper mounts are from EROFS snapshotter (have .erofslayer marker)
+	if _, err := erofsutils.MountsToLayer(upper); err != nil {
+		return err
+	}
+
 	if mountutils.NeedsMountManager(upper) {
 		if mm == nil {
 			return fmt.Errorf("mount manager is required to resolve formatted mounts: %w", errdefs.ErrNotImplemented)
@@ -324,31 +293,6 @@ func withUpperMount(ctx context.Context, upper []mount.Mount, mm mount.Manager, 
 		return mount.WithReadonlyTempMount(ctx, info.System, f)
 	}
 	return mount.WithReadonlyTempMount(ctx, upper, f)
-}
-
-// requiresMountResolution determines if the diff operation needs to go through
-// the mount manager path (walking diff) rather than the optimized overlay path.
-//
-// The optimized overlay diff can be used when:
-//   - Upper mounts are simple EROFS layers that can be accessed directly
-//   - No mounts require template resolution or filesystem creation
-//
-// The mount manager path is required when any of these conditions apply:
-//   - Upper has mkfs/* mounts (filesystem generated at mount time)
-//   - Lower or upper has templates (e.g., "{{ mount 0 }}")
-//   - Lower or upper has format/mkfs/mkdir mounts
-//   - Lower or upper has multi-device EROFS mounts
-func requiresMountResolution(lower, upper []mount.Mount) bool {
-	// mkfs/* mounts generate filesystem content at mount time,
-	// so we can't access the upper layer directly
-	for _, m := range upper {
-		if strings.HasPrefix(m.Type, "mkfs/") {
-			return true
-		}
-	}
-	// Any mount requiring the mount manager means we need to
-	// resolve through the walking diff path
-	return mountutils.NeedsMountManager(lower) || mountutils.NeedsMountManager(upper)
 }
 
 // lowerOverlayOnly returns true if the mounts represent an overlay with only
