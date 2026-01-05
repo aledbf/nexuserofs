@@ -1,0 +1,29 @@
+# Dockerfile for running tests with erofs-utils built from source
+# Build: docker build -t nexuserofs-test -f Dockerfile.test .
+# Run:   docker run --privileged --rm -v $(pwd):/workspace -w /workspace nexuserofs-test
+
+ARG GO_VERSION=1.25
+FROM golang:${GO_VERSION}
+
+# Install runtime dependencies (build deps are installed by build-erofs-utils.sh)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    e2fsprogs \
+    kmod \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and run the build script
+COPY scripts/build-erofs-utils.sh /tmp/build-erofs-utils.sh
+RUN /tmp/build-erofs-utils.sh /usr/local && rm /tmp/build-erofs-utils.sh
+
+# Verify installation
+RUN mkfs.erofs --version
+
+# Create loop devices (up to loop15 for tests)
+RUN for i in $(seq 0 15); do \
+        [ -e /dev/loop$i ] || mknod -m 0660 /dev/loop$i b 7 $i; \
+    done
+
+WORKDIR /workspace
+
+# Default command runs tests
+CMD ["go", "test", "-v", "./internal/...", "-test.root"]

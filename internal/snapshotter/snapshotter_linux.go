@@ -17,8 +17,8 @@
 package erofs
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,46 +27,30 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
-	"github.com/containerd/plugin"
+	"github.com/moby/sys/mountinfo"
 	"golang.org/x/sys/unix"
 
 	erofsutils "github.com/aledbf/nexuserofs/internal/erofs"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 )
 
-// defaultWritableSize controls the default writable layer mode.
-//
-// On Linux, this is set to 0 which enables "directory mode" - the writable
-// layer uses a plain directory on the host filesystem. This matches the
-// default behavior of other Linux snapshotters and works with any filesystem
-// that supports overlayfs (ext4, xfs with d_type, etc.).
-//
-// When set to a non-zero value, "block mode" is used instead: an ext4 image
-// file of the specified size is created and loop-mounted for the writable
-// layer. Block mode is required on non-Linux platforms and optional on Linux.
-//
-// See snapshotter_other.go for the non-Linux default (64 MiB block mode).
-const defaultWritableSize = 0
-
-// check if EROFS kernel filesystem is registered or not
-func findErofs() bool {
-	fs, err := os.ReadFile("/proc/filesystems")
-	if err != nil {
-		return false
-	}
-	return bytes.Contains(fs, []byte("\terofs\n"))
-}
+// defaultWritableSize is the default size for the ext4 writable layer.
+// An ext4 image file of this size is created and loop-mounted for each
+// active snapshot's writable layer.
+const defaultWritableSize = 64 * 1024 * 1024 // 64 MiB
 
 func checkCompatibility(root string) error {
+	// Check kernel version and EROFS support via preflight
+	if err := preflight.Check(); err != nil {
+		return fmt.Errorf("preflight check failed: %w", err)
+	}
+
 	supportsDType, err := fs.SupportsDType(root)
 	if err != nil {
 		return err
 	}
 	if !supportsDType {
 		return fmt.Errorf("%s does not support d_type. If the backing filesystem is xfs, please reformat with ftype=1 to enable d_type support", root)
-	}
-
-	if !findErofs() {
-		return fmt.Errorf("EROFS unsupported, please `modprobe erofs`: %w", plugin.ErrSkipPlugin)
 	}
 
 	return nil
@@ -97,92 +81,41 @@ func setImmutable(path string, enable bool) error {
 	return unix.IoctlSetPointerInt(int(f.Fd()), unix.FS_IOC_SETFLAGS, newattr)
 }
 
-func cleanupUpper(upper string) error {
-	return unmountAll(upper)
-}
-
-// cleanupViewMounts unmounts all EROFS layers mounted under the lower directory.
-// This is used to cleanup mounts created by viewMounts() for View snapshots.
-// If the lower directory doesn't exist (e.g., for non-View snapshots), returns nil.
-func cleanupViewMounts(lower string) error {
-	entries, err := os.ReadDir(lower)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No lower directory means no view mounts to cleanup
-		}
-		return fmt.Errorf("failed to read lower dir %s: %w", lower, err)
+// isNotMountError returns true if the error indicates the target was not mounted.
+// These errors are expected during cleanup when the path was never mounted.
+func isNotMountError(err error) bool {
+	if err == nil {
+		return false
 	}
-
-	var errs []error
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		target := filepath.Join(lower, e.Name())
-		if err := unmountAll(target); err != nil {
-			errs = append(errs, fmt.Errorf("unmount %s: %w", target, err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("cleanup view mounts failed: %v", errs)
-	}
-	return nil
-}
-
-// cleanupActiveMounts unmounts all active mounts under the upper directory.
-// This is a best-effort cleanup that continues to clean up remaining mounts
-// even if individual unmounts fail. Returns an error describing all failures.
-func cleanupActiveMounts(upper string) error {
-	var errs []error
-
-	merged := filepath.Join(upper, "merged")
-	lower := filepath.Join(upper, "lower")
-	rw := filepath.Join(upper, "rw")
-
-	if err := unmountAll(merged); err != nil {
-		errs = append(errs, fmt.Errorf("merged %s: %w", merged, err))
-	}
-
-	if entries, err := os.ReadDir(lower); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			target := filepath.Join(lower, e.Name())
-			if err := unmountAll(target); err != nil {
-				errs = append(errs, fmt.Errorf("lower %s: %w", target, err))
-			}
-		}
-	}
-
-	if err := unmountAll(rw); err != nil {
-		errs = append(errs, fmt.Errorf("rw %s: %w", rw, err))
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("cleanup failed: %v", errs)
-	}
-	return nil
+	// EINVAL: target is not a mount point
+	// ENOENT: path doesn't exist (already cleaned up)
+	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) || os.IsNotExist(err)
 }
 
 // unmountAll attempts to unmount the target. If normal unmount fails (e.g., due
 // to EBUSY), it falls back to lazy unmount (MNT_DETACH) which detaches the mount
 // immediately but may leave the mount lingering until all references are closed.
 //
-// Returns an error only if both normal and lazy unmount fail. If lazy unmount
-// succeeds, returns nil but wraps context about the fallback for callers who
-// want to log it.
+// Returns nil if the path was not mounted (EINVAL) or doesn't exist (ENOENT),
+// as these are expected during cleanup. Returns an error only for unexpected
+// failures like EBUSY that lazy unmount also can't resolve.
 func unmountAll(target string) error {
 	if err := mount.UnmountAll(target, 0); err != nil {
+		// If the target wasn't a mount point, that's fine - nothing to unmount
+		if isNotMountError(err) {
+			return nil
+		}
 		// Normal unmount failed, try lazy unmount as fallback.
 		// This detaches the mount immediately but resources may linger.
 		if derr := mount.UnmountAll(target, unix.MNT_DETACH); derr != nil {
+			// If lazy unmount also says "not mounted", that's fine
+			if isNotMountError(derr) {
+				return nil
+			}
 			// Both normal and lazy unmount failed - wrap the original error
 			return fmt.Errorf("unmount %s failed (lazy unmount also failed): %w", target, err)
 		}
 		// Lazy unmount succeeded - mount is detached but may linger.
-		// Return nil since cleanup succeeded; caller can log if needed.
 		return nil
 	}
 	return nil
@@ -228,6 +161,39 @@ func upperDirectoryPermission(p, parent string) error {
 	}
 	if err := os.Lchown(p, int(stat.Uid), int(stat.Gid)); err != nil {
 		return fmt.Errorf("failed to chown: %w", err)
+	}
+
+	return nil
+}
+
+// mountErofsLayer mounts an EROFS layer at the specified mount point using a loop device.
+// The mount is read-only. Returns nil if already mounted or if mounting succeeds.
+func mountErofsLayer(layerPath, mountPoint string) error {
+	return mountErofsWithOptions(mount.Mount{
+		Type:    "erofs",
+		Source:  layerPath,
+		Options: []string{"ro", "loop"},
+	}, mountPoint)
+}
+
+// mountErofsWithOptions mounts an EROFS image with custom options.
+// Used for fsmeta mounts that need device= options for multi-device support.
+func mountErofsWithOptions(m mount.Mount, mountPoint string) error {
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("failed to create mount point: %w", err)
+	}
+
+	// Check if already mounted to make this idempotent
+	mounted, err := mountinfo.Mounted(mountPoint)
+	if err != nil {
+		return fmt.Errorf("failed to check if %s is mounted: %w", mountPoint, err)
+	}
+	if mounted {
+		return nil // Already mounted, nothing to do
+	}
+
+	if err := m.Mount(mountPoint); err != nil {
+		return fmt.Errorf("failed to mount EROFS layer %s at %s: %w", m.Source, mountPoint, err)
 	}
 
 	return nil

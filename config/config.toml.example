@@ -16,12 +16,10 @@ containerd_address = "/run/containerd/containerd.sock"
 containerd_namespace = "default"
 
 [snapshotter.options]
-# Default writable layer size in bytes
-# 0 = directory mode (no block device, uses overlayfs upperdir)
-# >0 = block mode (uses ext4 loop mount for writable layer)
-# Block mode is useful for VM-based runtimes like qemubox
-# default_writable_size = "512M"
-default_writable_size = 0
+# Size of the ext4 writable layer for each container.
+# An ext4 image of this size is created and loop-mounted for the overlay upperdir.
+# Must be > 0. Common values: "64M", "256M", "1G"
+default_writable_size = "1G"
 
 # Enable fsverity for layer integrity validation
 # Requires kernel 5.4+ and filesystem support
@@ -35,11 +33,10 @@ set_immutable = true
 # Common options: index=off, metacopy=off, userxattr
 overlay_options = ["index=off", "metacopy=off"]
 
-# Maximum number of unmerged layers before triggering fsmerge
-# 0 = disabled (no layer merging)
-# >0 = merge layers when count exceeds this threshold
+# Layer count threshold for triggering fsmerge (must be >= 5)
+# Layers are merged when count exceeds this threshold
 # Requires mkfs.erofs with --aufs support
-max_unmerged_layers = 0
+max_unmerged_layers = 5
 
 [differ]
 # Extra mkfs.erofs options for layer conversion

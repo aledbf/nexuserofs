@@ -48,14 +48,10 @@ type SnapshotterConfig struct {
 	enableFsverity bool
 	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
 	setImmutable bool
-	// defaultSize creates a default size writable layer for active snapshots
+	// defaultSize is the size in bytes of the ext4 writable layer (must be > 0)
 	defaultSize int64
-	// fsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
+	// fsMergeThreshold is the layer count threshold for triggering fsmerge (must be >= 5)
 	fsMergeThreshold uint
-	// directViewMounts enables mounting EROFS layers directly for View snapshots,
-	// returning real paths instead of template-based mounts. This is required for
-	// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
-	directViewMounts bool
 }
 
 // Opt is an option to configure the erofs snapshotter
@@ -82,35 +78,20 @@ func WithImmutable() Opt {
 	}
 }
 
-// WithDefaultSize creates a default size writable layer for active snapshots
+// WithDefaultSize sets the size of the ext4 writable layer for active snapshots.
+// Size must be > 0. The writable layer is an ext4 image that is loop-mounted.
 func WithDefaultSize(size int64) Opt {
 	return func(config *SnapshotterConfig) {
 		config.defaultSize = size
 	}
 }
 
-// WithFsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
+// WithFsMergeThreshold sets the layer count threshold for triggering fsmerge.
+// Must be >= 5. Layers are merged when count exceeds this threshold.
 func WithFsMergeThreshold(v uint) Opt {
 	return func(config *SnapshotterConfig) {
 		config.fsMergeThreshold = v
 	}
-}
-
-// WithDirectViewMounts enables mounting EROFS layers directly for View snapshots,
-// returning real paths instead of template-based mounts. This is required for
-// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
-// When disabled (default), View snapshots with multiple layers return template-based
-// mounts that require a mount manager for resolution.
-func WithDirectViewMounts() Opt {
-	return func(config *SnapshotterConfig) {
-		config.directViewMounts = true
-	}
-}
-
-type MetaStore interface {
-	TransactionContext(ctx context.Context, writable bool) (context.Context, storage.Transactor, error)
-	WithTransaction(ctx context.Context, writable bool, fn storage.TransactionCallback) error
-	Close() error
 }
 
 type snapshotter struct {
@@ -121,13 +102,6 @@ type snapshotter struct {
 	setImmutable     bool
 	defaultWritable  int64
 	fsMergeThreshold uint
-	directViewMounts bool
-}
-
-// isBlockMode returns true if the snapshotter uses block-based writable layers
-// (ext4 image files) instead of directory-based layers.
-func (s *snapshotter) isBlockMode() bool {
-	return s.defaultWritable > 0
 }
 
 // extractLabel is the label key used to mark snapshots for layer extraction.
@@ -143,7 +117,8 @@ const extractLabel = "containerd.io/snapshot/erofs.extract"
 // are stored under the provided root. A metadata file is stored under the root.
 func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	config := SnapshotterConfig{
-		defaultSize: defaultWritableSize,
+		defaultSize:      defaultWritableSize,
+		fsMergeThreshold: 5, // Minimum threshold for layer merging
 	}
 	for _, opt := range opts {
 		opt(&config)
@@ -153,11 +128,16 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, fmt.Errorf("failed to create root directory %q: %w", root, err)
 	}
 
-	if config.defaultSize == 0 {
-		// If not block mode, check root compatibility
-		if err := checkCompatibility(root); err != nil {
-			return nil, fmt.Errorf("compatibility check failed for %q: %w", root, err)
-		}
+	if config.defaultSize <= 0 {
+		return nil, fmt.Errorf("default_writable_size must be > 0, got %d", config.defaultSize)
+	}
+
+	if config.fsMergeThreshold < 5 {
+		return nil, fmt.Errorf("fs_merge_threshold must be >= 5, got %d", config.fsMergeThreshold)
+	}
+
+	if err := checkCompatibility(root); err != nil {
+		return nil, fmt.Errorf("compatibility check failed for %q: %w", root, err)
 	}
 
 	// Check fsverity support if enabled
@@ -193,35 +173,107 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		setImmutable:     config.setImmutable,
 		defaultWritable:  config.defaultSize,
 		fsMergeThreshold: config.fsMergeThreshold,
-		directViewMounts: config.directViewMounts,
 	}, nil
 }
 
 // Close releases all resources held by the snapshotter.
-// It closes the metadata store (BBolt database) but does not unmount
-// any active snapshots. This method is safe to call multiple times;
-// subsequent calls will return the same error (if any) from the first close.
+// It cleans up any temporary directories and closes the metadata store (BBolt database).
+// This method is safe to call multiple times; subsequent calls will return the same
+// error (if any) from the first close.
 func (s *snapshotter) Close() error {
+	// Cleanup block mode rw mounts if any
+	s.cleanupBlockMounts()
+
 	return s.ms.Close()
+}
+
+// cleanupBlockMounts unmounts any ext4 rw mounts and layer mounts.
+// Errors are logged but not returned since this is best-effort cleanup.
+func (s *snapshotter) cleanupBlockMounts() {
+	snapshotsDir := filepath.Join(s.root, "snapshots")
+	entries, err := os.ReadDir(snapshotsDir)
+	if err != nil {
+		// If the directory doesn't exist, there's nothing to clean up
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		snapshotDir := filepath.Join(snapshotsDir, entry.Name())
+
+		// Cleanup block mode rw mounts (ext4 loop mounts)
+		rwDir := filepath.Join(snapshotDir, "rw")
+		if err := unmountAll(rwDir); err != nil {
+			log.L.WithError(err).WithField("path", rwDir).Debug("failed to cleanup block rw mount during close")
+		}
+
+		// Cleanup layer mounts (EROFS loop mounts used for views)
+		layersDir := filepath.Join(snapshotDir, "layers")
+		if err := mount.UnmountRecursive(layersDir, 0); err != nil {
+			log.L.WithError(err).WithField("path", layersDir).Debug("failed to cleanup layer mounts during close")
+		}
+	}
 }
 
 func (s *snapshotter) upperPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "fs")
 }
 
-func (s *snapshotter) upperDir(id string) string {
-	if s.isBlockMode() {
-		return filepath.Join(s.upperPath(id), "rw", "upper")
-	}
-	return s.upperPath(id)
-}
-
-func (s *snapshotter) workPath(id string) string {
-	return filepath.Join(s.root, "snapshots", id, "work")
+// layerMountPath returns the mount path for a specific layer in a snapshot.
+// Layers are indexed from 0 (bottom/oldest) to N (top/newest).
+func (s *snapshotter) layerMountPath(id string, layerIndex int) string {
+	return filepath.Join(s.root, "snapshots", id, "layers", fmt.Sprintf("%d", layerIndex))
 }
 
 func (s *snapshotter) writablePath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "rwlayer.img")
+}
+
+// blockRwMountPath returns the mount point for the ext4 rwlayer in block mode.
+func (s *snapshotter) blockRwMountPath(id string) string {
+	return filepath.Join(s.root, "snapshots", id, "rw")
+}
+
+// blockUpperPath returns the overlay upperdir inside the mounted ext4.
+func (s *snapshotter) blockUpperPath(id string) string {
+	return filepath.Join(s.blockRwMountPath(id), "upper")
+}
+
+// blockWorkPath returns the overlay workdir inside the mounted ext4.
+func (s *snapshotter) blockWorkPath(id string) string {
+	return filepath.Join(s.blockRwMountPath(id), "work")
+}
+
+// mountBlockRwLayer mounts the ext4 rwlayer image at the rw mount point.
+// This is idempotent - if already mounted, returns nil.
+func (s *snapshotter) mountBlockRwLayer(id string) error {
+	rwPath := s.writablePath(id)
+	mountPoint := s.blockRwMountPath(id)
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("failed to create rw mount point: %w", err)
+	}
+
+	// Check if already mounted
+	alreadyMounted, err := mountinfo.Mounted(mountPoint)
+	if err != nil {
+		return fmt.Errorf("failed to check mount status for %s: %w", mountPoint, err)
+	}
+	if alreadyMounted {
+		return nil
+	}
+
+	m := mount.Mount{
+		Source:  rwPath,
+		Type:    "ext4",
+		Options: []string{"rw", "loop", "user_xattr"},
+	}
+	if err := m.Mount(mountPoint); err != nil {
+		return fmt.Errorf("failed to mount ext4 rwlayer: %w", err)
+	}
+	return nil
 }
 
 // createWritableLayer creates and formats an ext4 filesystem image file.
@@ -278,7 +330,7 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
-func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
+func (s *snapshotter) prepareDirectory(snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
@@ -288,11 +340,6 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 		return td, err
 	}
 	if kind == snapshots.KindActive {
-		if !s.isBlockMode() {
-			if err := os.Mkdir(filepath.Join(td, "work"), 0711); err != nil {
-				return td, err
-			}
-		}
 		// Create EROFS layer marker at snapshot root (e.g., /snapshots/{id}/.erofslayer).
 		// This is the primary marker location checked by the differ for bind/overlay mounts.
 		// Uses ensureMarkerFile for atomic creation consistent with other code paths.
@@ -305,52 +352,68 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 }
 
 func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, bool) {
-	if s.isBlockMode() {
-		return mount.Mount{}, false
-	}
-
-	mergedMeta := s.fsMetaPath(snap.ParentIDs[id])
-	if fi, err := os.Stat(mergedMeta); err != nil || fi.Size() == 0 {
-		return mount.Mount{}, false
-	}
-
-	m := mount.Mount{
-		Source:  mergedMeta,
-		Type:    "erofs",
-		Options: []string{"ro", "loop"},
-	}
-	for j := len(snap.ParentIDs) - 1; j >= id; j-- {
-		blob := s.layerBlobPath(snap.ParentIDs[j])
-		fi, err := os.Stat(blob)
-		if err != nil || fi.Size() == 0 {
-			return mount.Mount{}, false
-		}
-		m.Options = append(m.Options, "device="+blob)
-	}
-	return m, true
+	// fsmeta mounting is disabled because the kernel EROFS driver's device=
+	// option requires pre-setup loop devices, not file paths. The fsmeta files
+	// are still generated for potential future use (e.g., when containerd's
+	// mount manager gains support for setting up multi-device EROFS mounts).
+	return mount.Mount{}, false
 }
 
 // mounts returns mount specifications for a snapshot.
-// For blockMode active snapshots, it performs actual mounting via activeMounts.
-// For other cases, it returns template-based mount specs for the mount manager.
+// All mounts are directly usable without requiring mount-manager plugins.
+// EROFS layers are mounted directly and real overlay paths are returned.
 func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
-	if s.isBlockMode() && snap.Kind == snapshots.KindActive {
-		if isExtractSnapshot(info) {
-			return s.diffMounts(snap)
-		}
-		return s.templateMounts(snap)
+	// Extract snapshots always use bind mount to fs/ directory
+	if isExtractSnapshot(info) {
+		return s.diffMounts(snap)
 	}
 
-	// For KindView snapshots with multiple layers, optionally mount the layers and
-	// return real paths. This is needed for standard containerd operations like
-	// 'nerdctl commit' that don't use a mount manager that understands template syntax.
-	// When directViewMounts is false (default), templates are returned for use with
-	// mount managers (e.g., differ workflow, VM runtimes).
-	if s.directViewMounts && snap.Kind == snapshots.KindView && len(snap.ParentIDs) > 1 {
+	// View snapshots - read-only access to committed layers
+	if snap.Kind == snapshots.KindView {
+		// View with no parent: return read-only bind mount to empty fs directory
+		if len(snap.ParentIDs) == 0 {
+			fsPath := s.viewLowerPath(snap.ID)
+			if err := os.MkdirAll(fsPath, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create view fs directory: %w", err)
+			}
+			return []mount.Mount{
+				{
+					Source:  fsPath,
+					Type:    "bind",
+					Options: []string{"ro", "rbind"},
+				},
+			}, nil
+		}
+		// Single-layer View: return EROFS mount directly.
+		// Overlay with single lowerdir and no upperdir/workdir is invalid in Linux.
+		if len(snap.ParentIDs) == 1 {
+			layerBlob, err := s.lowerPath(snap.ParentIDs[0])
+			if err != nil {
+				return nil, fmt.Errorf("failed to get layer blob for view parent %s: %w", snap.ParentIDs[0], err)
+			}
+			return []mount.Mount{
+				{
+					Source:  layerBlob,
+					Type:    "erofs",
+					Options: []string{"ro", "loop"},
+				},
+			}, nil
+		}
+		// Multi-layer View: mount EROFS layers and return overlay
 		return s.viewMounts(snap)
 	}
 
-	return s.templateMounts(snap)
+	// Active snapshots
+	if snap.Kind == snapshots.KindActive {
+		if len(snap.ParentIDs) == 0 {
+			// No parents: bind mount to upper directory
+			return s.singleLayerMounts(snap)
+		}
+		// With parents: mount EROFS layers and return overlay
+		return s.activeMounts(snap)
+	}
+
+	return nil, fmt.Errorf("unsupported snapshot kind: %v", snap.Kind)
 }
 
 // isExtractSnapshot returns true if the snapshot is marked for layer extraction.
@@ -360,203 +423,28 @@ func isExtractSnapshot(info snapshots.Info) bool {
 	return info.Labels[extractLabel] == "true"
 }
 
-// templateMounts builds mount specifications using templates for the mount manager.
-func (s *snapshotter) templateMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	var options []string
-
-	if len(snap.ParentIDs) == 0 {
-		return s.singleLayerMounts(snap, options)
+// singleLayerMounts returns mounts for an Active snapshot with no parent layers.
+// This is used for new snapshots created with Prepare("key", "") - i.e., no parent.
+func (s *snapshotter) singleLayerMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	if snap.Kind != snapshots.KindActive {
+		return nil, fmt.Errorf("singleLayerMounts only supports Active snapshots, got %v", snap.Kind)
 	}
 
-	var mounts []mount.Mount
-	if snap.Kind == snapshots.KindActive {
-		mounts, options = s.activeLayerMounts(snap, options)
-	} else if len(snap.ParentIDs) == 1 {
-		// Single parent view - return EROFS mount directly
-		layerBlob, err := s.lowerPath(snap.ParentIDs[0])
-		if err != nil {
-			return nil, err
-		}
-		return []mount.Mount{
-			{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			},
-		}, nil
+	// Mount ext4 and return bind mount to upper inside it
+	if err := s.mountBlockRwLayer(snap.ID); err != nil {
+		return nil, fmt.Errorf("failed to mount block rw layer: %w", err)
 	}
-
-	// Build lower layer mounts
-	first := len(mounts)
-	for i := range snap.ParentIDs {
-		if s.fsMergeThreshold > 0 {
-			if m, ok := s.mountFsMeta(snap, i); ok {
-				mounts = append(mounts, m)
-				first = len(mounts) - 1
-				break
-			}
-		}
-
-		layerBlob, err := s.lowerPath(snap.ParentIDs[i])
-		if err != nil {
-			return nil, err
-		}
-		mounts = append(mounts, mount.Mount{
-			Source:  layerBlob,
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
-		})
+	upperPath := s.blockUpperPath(snap.ID)
+	if err := os.MkdirAll(upperPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create block upperdir: %w", err)
 	}
-
-	// Build overlay options
-	if (len(mounts) - first) == 1 {
-		if snap.Kind == snapshots.KindView {
-			return mounts, nil
-		}
-		options = append(options, fmt.Sprintf("lowerdir={{ mount %d }}", first))
-	} else {
-		options = append(options, fmt.Sprintf("lowerdir={{ overlay %d %d }}", first, len(mounts)-1))
-	}
-	if snap.Kind == snapshots.KindView {
-		options = append(options, "ro")
-	}
-	options = append(options, s.ovlOptions...)
-
-	return append(mounts, mount.Mount{
-		Type:    "format/mkdir/overlay",
-		Source:  "overlay",
-		Options: options,
-	}), nil
-}
-
-// singleLayerMounts returns mounts for a snapshot with no parent layers.
-func (s *snapshotter) singleLayerMounts(snap storage.Snapshot, options []string) ([]mount.Mount, error) {
-	// Check if this is a committed layer
-	if layerBlob, err := s.lowerPath(snap.ID); err == nil {
-		if snap.Kind != snapshots.KindView {
-			return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
-		}
-		if s.enableFsverity {
-			if err := s.verifyFsverity(layerBlob); err != nil {
-				return nil, err
-			}
-		}
-		return []mount.Mount{
-			{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			},
-		}, nil
-	}
-
-	// No parents and no committed layer - return bind mount
-	roFlag := "rw"
-	if snap.Kind == snapshots.KindView {
-		roFlag = "ro"
-	}
-
-	if s.isBlockMode() {
-		writablePath := s.writablePath(snap.ID)
-
-		// Check if the writable layer was already created by createWritableLayer()
-		// during Prepare(). If so, use ext4 type directly. Otherwise, use mkfs/ext4
-		// to have the mount manager create and format it (lazy creation fallback).
-		var writableMount mount.Mount
-		if _, err := os.Stat(writablePath); err == nil {
-			// File exists - already formatted by createWritableLayer()
-			writableMount = mount.Mount{
-				Source:  writablePath,
-				Type:    "ext4",
-				Options: []string{roFlag, "loop"},
-			}
-		} else {
-			// File doesn't exist - use mkfs transformer for lazy creation
-			writableMount = mount.Mount{
-				Source: writablePath,
-				Type:   "mkfs/ext4",
-				Options: []string{
-					"X-containerd.mkfs.fs=ext4",
-					fmt.Sprintf("X-containerd.mkfs.size=%d", s.defaultWritable),
-					roFlag,
-					"loop",
-				},
-			}
-		}
-
-		return []mount.Mount{
-			writableMount,
-			{
-				Source: "{{ mount 0 }}/upper",
-				Type:   "format/mkdir/bind",
-				Options: append(options,
-					"X-containerd.mkdir.path={{ mount 0 }}/upper:0755",
-					roFlag,
-					"rbind",
-				),
-			},
-		}, nil
-	}
-
 	return []mount.Mount{
 		{
-			Source: s.upperPath(snap.ID),
-			Type:   "bind",
-			Options: append(options,
-				roFlag,
-				"rbind",
-			),
+			Source:  upperPath,
+			Type:    "bind",
+			Options: []string{"rw", "rbind"},
 		},
 	}, nil
-}
-
-// activeLayerMounts returns the initial mounts and options for an active snapshot.
-func (s *snapshotter) activeLayerMounts(snap storage.Snapshot, options []string) ([]mount.Mount, []string) {
-	var mounts []mount.Mount
-
-	if s.isBlockMode() {
-		writablePath := s.writablePath(snap.ID)
-
-		// Check if the writable layer was already created by createWritableLayer()
-		// during Prepare(). If so, use ext4 type directly. Otherwise, use mkfs/ext4
-		// to have the mount manager create and format it (lazy creation fallback).
-		var m mount.Mount
-		if _, err := os.Stat(writablePath); err == nil {
-			// File exists - already formatted by createWritableLayer()
-			m = mount.Mount{
-				Source:  writablePath,
-				Type:    "ext4",
-				Options: []string{"rw", "loop"},
-			}
-		} else {
-			// File doesn't exist - use mkfs transformer for lazy creation
-			m = mount.Mount{
-				Source: writablePath,
-				Type:   "mkfs/ext4",
-				Options: []string{
-					"X-containerd.mkfs.fs=ext4",
-					fmt.Sprintf("X-containerd.mkfs.size=%d", s.defaultWritable),
-					"rw",
-					"loop",
-				},
-			}
-		}
-		mounts = append(mounts, m)
-
-		options = append(options,
-			"X-containerd.mkdir.path={{ mount 0 }}/upper:0755",
-			"X-containerd.mkdir.path={{ mount 0 }}/work:0755",
-			"workdir={{ mount 0 }}/work",
-			"upperdir={{ mount 0 }}/upper",
-		)
-	} else {
-		options = append(options,
-			fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
-			fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
-		)
-	}
-
-	return mounts, options
 }
 
 // isExtractKey returns true if the key indicates an extract/unpack operation.
@@ -622,78 +510,131 @@ func (s *snapshotter) viewLowerPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "lower")
 }
 
-// viewMounts mounts EROFS layers and returns a standard overlay mount with real paths.
-// This is used for KindView snapshots with multiple layers, allowing standard containerd
-// operations (like 'nerdctl commit') to mount the snapshot without a special mount manager.
-//
-// The EROFS layers are mounted under <snapshot>/lower/<index> and an overlay is created
-// using these as lowerdir. The mounts are cleaned up when the View snapshot is removed.
-func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	lowerRoot := s.viewLowerPath(snap.ID)
-
-	// Check if we have a merged fsmeta that collapses all layers into one
-	if s.fsMergeThreshold > 0 {
-		if m, ok := s.mountFsMeta(snap, 0); ok {
-			// Single merged EROFS mount - return directly
-			return []mount.Mount{m}, nil
-		}
-	}
-
-	// Mount each EROFS layer and build lowerdir paths
-	var lowerDirs []string
-	for i, parentID := range snap.ParentIDs {
+// getErofsLayerPaths returns the EROFS layer blob paths for a snapshot.
+// This returns file paths without mounting - the consumer
+// transforms these to virtio-blk disks or uses mount manager to mount them.
+func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error) {
+	var paths []string
+	for _, parentID := range snap.ParentIDs {
 		layerBlob, err := s.lowerPath(parentID)
 		if err != nil {
 			return nil, err
 		}
+		paths = append(paths, layerBlob)
+	}
+	return paths, nil
+}
 
-		// Mount point for this layer
-		mountPoint := filepath.Join(lowerRoot, fmt.Sprintf("%d", i))
-		if err := os.MkdirAll(mountPoint, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create mount point %s: %w", mountPoint, err)
+// viewMounts returns mounts for KindView snapshots.
+// For single-layer views, returns a single EROFS mount.
+// For multi-layer views, mounts all layers and returns an overlay.
+func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	// Check if we have a merged fsmeta that collapses all layers into one
+	if s.fsMergeThreshold > 0 {
+		if m, ok := s.mountFsMeta(snap, 0); ok {
+			return []mount.Mount{m}, nil
 		}
-
-		// Check if already mounted (Mounts() may be called multiple times)
-		alreadyMounted, err := mountinfo.Mounted(mountPoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check mount status for %s: %w", mountPoint, err)
-		}
-		if !alreadyMounted {
-			// Mount the EROFS layer
-			m := mount.Mount{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			}
-			if err := m.Mount(mountPoint); err != nil {
-				// Best-effort cleanup of already mounted layers
-				for j := i - 1; j >= 0; j-- {
-					_ = mount.UnmountAll(filepath.Join(lowerRoot, fmt.Sprintf("%d", j)), 0)
-				}
-				return nil, fmt.Errorf("failed to mount layer %s: %w", layerBlob, err)
-			}
-		}
-
-		lowerDirs = append(lowerDirs, mountPoint)
 	}
 
-	// Build the lowerdir option with real paths (newest first for overlay)
-	// Overlay expects lowerdir in order from top to bottom
-	lowerdir := strings.Join(lowerDirs, ":")
-
-	options := []string{
-		fmt.Sprintf("lowerdir=%s", lowerdir),
-		"ro",
+	// Get EROFS layer paths
+	layerPaths, err := s.getErofsLayerPaths(snap)
+	if err != nil {
+		return nil, err
 	}
-	options = append(options, s.ovlOptions...)
 
-	return []mount.Mount{
-		{
-			Type:    "overlay",
-			Source:  "overlay",
-			Options: options,
-		},
-	}, nil
+	// Single layer: return EROFS mount directly
+	if len(layerPaths) == 1 {
+		return []mount.Mount{{
+			Source:  layerPaths[0],
+			Type:    "erofs",
+			Options: []string{"ro", "loop"},
+		}}, nil
+	}
+
+	// Multi-layer: mount each layer and return overlay
+	// ParentIDs are ordered from newest (immediate parent) to oldest (root).
+	// For overlayfs, lowerdir must be ordered top-to-bottom (newest first).
+	var lowerdirs []string
+	for i, layerPath := range layerPaths {
+		mountPath := s.layerMountPath(snap.ID, i)
+		if err := mountErofsLayer(layerPath, mountPath); err != nil {
+			// Cleanup already mounted layers on error
+			for j := range i {
+				_ = unmountAll(s.layerMountPath(snap.ID, j))
+			}
+			return nil, err
+		}
+		lowerdirs = append(lowerdirs, mountPath)
+	}
+
+	// Return overlay combining all layers (read-only)
+	return []mount.Mount{{
+		Type:    "overlay",
+		Source:  "overlay",
+		Options: []string{"lowerdir=" + strings.Join(lowerdirs, ":")},
+	}}, nil
+}
+
+// activeMounts returns mounts for active (writable) snapshots.
+// Mounts all parent layers and returns an overlay with writable upper.
+// Note: fsmeta is NOT used for active mounts because the kernel's EROFS
+// device= option requires loop devices to be pre-setup, which we can't do
+// when mounting ourselves. For views, we return mount specs that containerd
+// can mount using its mount manager with proper loop device setup.
+func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	// Get EROFS layer paths
+	layerPaths, err := s.getErofsLayerPaths(snap)
+	if err != nil {
+		return nil, err
+	}
+
+	// No parent layers: return just the upper directory as bind mount
+	if len(layerPaths) == 0 {
+		return []mount.Mount{{
+			Type:    "bind",
+			Source:  s.blockUpperPath(snap.ID),
+			Options: []string{"rw", "rbind"},
+		}}, nil
+	}
+
+	// Mount each layer and collect mount paths
+	// ParentIDs are ordered from newest (immediate parent) to oldest (root).
+	// For overlayfs, lowerdir must be ordered top-to-bottom (newest first).
+	var lowerdirs []string
+	for i, layerPath := range layerPaths {
+		mountPath := s.layerMountPath(snap.ID, i)
+		if err := mountErofsLayer(layerPath, mountPath); err != nil {
+			// Cleanup already mounted layers on error
+			for j := range i {
+				_ = unmountAll(s.layerMountPath(snap.ID, j))
+			}
+			return nil, err
+		}
+		lowerdirs = append(lowerdirs, mountPath)
+	}
+
+	return s.activeOverlayMounts(snap, lowerdirs, false)
+}
+
+// activeOverlayMounts builds the writable overlay configuration for an active snapshot.
+// lowerdirs are the mounted paths for lower layers (already mounted).
+// isFsmeta indicates if the lower is a merged fsmeta mount (needs special handling).
+func (s *snapshotter) activeOverlayMounts(snap storage.Snapshot, lowerdirs []string, isFsmeta bool) ([]mount.Mount, error) {
+	upperPath := s.blockUpperPath(snap.ID)
+	workPath := s.blockWorkPath(snap.ID)
+
+	overlayOptions := []string{
+		"lowerdir=" + strings.Join(lowerdirs, ":"),
+		"upperdir=" + upperPath,
+		"workdir=" + workPath,
+	}
+	overlayOptions = append(overlayOptions, s.ovlOptions...)
+
+	return []mount.Mount{{
+		Type:    "overlay",
+		Source:  "overlay",
+		Options: overlayOptions,
+	}}, nil
 }
 
 func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
@@ -719,8 +660,13 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		}
 	}()
 
+	// Check context before starting work
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled before snapshot creation: %w", err)
+	}
+
 	snapshotDir := filepath.Join(s.root, "snapshots")
-	td, err = s.prepareDirectory(ctx, snapshotDir, kind)
+	td, err = s.prepareDirectory(snapshotDir, kind)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prepare snapshot dir: %w", err)
 	}
@@ -761,19 +707,37 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		return nil, err
 	}
 
+	// Check context after transaction - don't proceed with expensive operations if cancelled
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context cancelled after transaction: %w", err)
+	}
+
 	// Generate fsmeta outside of the transaction since it's unnecessary.
 	// Also ignore all errors since it's a nice-to-have stuff.
 	if !isExtractKey(key) {
 		s.generateFsMeta(ctx, snap.ParentIDs)
 	}
 
-	// For active snapshots in block mode, create the writable layer immediately.
-	// This avoids the need for lazy mkfs/ext4 processing which requires a mount
-	// manager and doesn't work well with VM-based runtimes that need the file
-	// to exist before mounting.
-	if kind == snapshots.KindActive && s.isBlockMode() && !isExtractKey(key) {
+	// For active snapshots, create and mount the writable layer.
+	// This returns directly usable mounts.
+	if kind == snapshots.KindActive && !isExtractKey(key) {
+		// Check context before expensive writable layer creation
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("context cancelled before writable layer creation: %w", err)
+		}
 		if err := s.createWritableLayer(ctx, snap.ID); err != nil {
 			return nil, fmt.Errorf("failed to create writable layer: %w", err)
+		}
+		// Mount the ext4 layer immediately so mounts() can return real paths
+		if err := s.mountBlockRwLayer(snap.ID); err != nil {
+			return nil, fmt.Errorf("failed to mount writable layer: %w", err)
+		}
+		// Create upper/work directories inside the mounted ext4
+		if err := os.MkdirAll(s.blockUpperPath(snap.ID), 0755); err != nil {
+			return nil, fmt.Errorf("failed to create block upperdir: %w", err)
+		}
+		if err := os.MkdirAll(s.blockWorkPath(snap.ID), 0711); err != nil {
+			return nil, fmt.Errorf("failed to create block workdir: %w", err)
 		}
 	}
 
@@ -792,49 +756,52 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 	layer := s.writablePath(id)
 	if _, err := os.Stat(layer); err != nil {
 		if os.IsNotExist(err) {
-			if cerr := convertDirToErofs(ctx, layerBlob, s.upperPath(id)); cerr != nil {
+			// No block layer - convert directory mode upper
+			upperDir := s.upperPath(id)
+			if cerr := convertDirToErofs(ctx, layerBlob, upperDir); cerr != nil {
 				return fmt.Errorf("failed to convert upper to erofs layer: %w", cerr)
 			}
-			// TODO: Cleanup method?
 			return nil
 		}
 		return fmt.Errorf("failed to access writable layer %s: %w", layer, err)
 	}
 
-	rwRoot := filepath.Join(s.upperPath(id), "rw")
-	if err := os.MkdirAll(rwRoot, 0755); err != nil {
-		return fmt.Errorf("failed to create rw root: %w", err)
-	}
+	// Block mode: use the new rw mount path
+	rwMount := s.blockRwMountPath(id)
 
-	// Check if already mounted (from Prepare) before trying to mount again.
-	// If already mounted, we can use the existing mount.
-	alreadyMounted, err := mountinfo.Mounted(rwRoot)
+	// Check if already mounted (from Prepare/Mounts) before trying to mount again.
+	alreadyMounted, err := mountinfo.Mounted(rwMount)
 	if err != nil {
 		return fmt.Errorf("failed to check mount status: %w", err)
 	}
 	if !alreadyMounted {
+		// Mount read-only for commit (we're just reading the upper contents)
+		if err := os.MkdirAll(rwMount, 0755); err != nil {
+			return fmt.Errorf("failed to create rw mount point: %w", err)
+		}
 		m := mount.Mount{
 			Source:  layer,
 			Type:    "ext4",
 			Options: []string{"ro", "loop", "noload"},
 		}
-		if err := m.Mount(rwRoot); err != nil {
+		if err := m.Mount(rwMount); err != nil {
 			return fmt.Errorf("failed to mount writable layer %s: %w", layer, err)
 		}
-		log.G(ctx).WithField("target", rwRoot).Debug("Mounted writable layer for conversion")
+		log.G(ctx).WithField("target", rwMount).Debug("Mounted writable layer for conversion")
 	}
 
-	// Always cleanup active mounts after conversion
+	// Cleanup the block rw mount after conversion
 	defer func() {
-		if err := cleanupActiveMounts(s.upperPath(id)); err != nil {
-			log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup active mounts after conversion")
+		if err := unmountAll(rwMount); err != nil {
+			log.G(ctx).WithError(err).WithField("id", id).Warn("failed to cleanup block rw mount after conversion")
 		}
 	}()
 
-	upperDir := s.upperDir(id)
+	// Convert the upper directory inside the mounted ext4
+	upperDir := s.blockUpperPath(id)
 	if _, err := os.Stat(upperDir); os.IsNotExist(err) {
-		// upper is empty, just convert the empty directory
-		upperDir = s.upperPath(id)
+		// upper is empty, convert empty directory
+		upperDir = rwMount
 	}
 	if cerr := convertDirToErofs(ctx, layerBlob, upperDir); cerr != nil {
 		return fmt.Errorf("failed to convert upper block to erofs layer: %w", cerr)
@@ -1007,17 +974,20 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	// key no longer available.
 	defer func() {
 		if err == nil {
-			cleanup := cleanupUpper
-			if s.isBlockMode() {
-				cleanup = cleanupActiveMounts
-			}
-			if err := cleanup(s.upperPath(id)); err != nil {
-				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup upperdir")
+			// Cleanup layer mounts (from viewMounts/activeMounts)
+			layersDir := filepath.Join(s.root, "snapshots", id, "layers")
+			if entries, derr := os.ReadDir(layersDir); derr == nil {
+				for _, entry := range entries {
+					layerMount := filepath.Join(layersDir, entry.Name())
+					if uerr := unmountAll(layerMount); uerr != nil {
+						log.G(ctx).WithError(uerr).WithField("path", layerMount).Warn("failed to unmount layer")
+					}
+				}
 			}
 
-			// Cleanup View snapshot lower mounts (created by viewMounts)
-			if err := cleanupViewMounts(s.viewLowerPath(id)); err != nil {
-				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup view lower mounts")
+			// Cleanup block rw mount
+			if err := unmountAll(s.blockRwMountPath(id)); err != nil {
+				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup block rw mount")
 			}
 
 			for _, dir := range removals {
@@ -1063,18 +1033,27 @@ func (s *snapshotter) Cleanup(ctx context.Context) (err error) {
 		return err
 	}
 
-	cleanup := cleanupUpper
-	if s.isBlockMode() {
-		cleanup = cleanupActiveMounts
-	}
-
+	var cleanupErrs []error
 	for _, dir := range removals {
-		_ = cleanup(filepath.Join(dir, "fs"))
-		_ = cleanupViewMounts(filepath.Join(dir, "lower"))
-		_ = setImmutable(filepath.Join(dir, erofsutils.LayerBlobFilename), false)
+		// Cleanup block rw mount
+		if err := unmountAll(filepath.Join(dir, "rw")); err != nil {
+			log.G(ctx).WithError(err).WithField("path", dir).Debug("failed to cleanup block rw mount")
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup rw %s: %w", dir, err))
+		}
+		if err := setImmutable(filepath.Join(dir, erofsutils.LayerBlobFilename), false); err != nil && !errdefs.IsNotImplemented(err) {
+			log.G(ctx).WithError(err).WithField("path", dir).Debug("failed to clear immutable flag")
+			// Don't add to cleanupErrs - this is best-effort and shouldn't fail cleanup
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove %s: %w", dir, err))
 		}
+	}
+
+	if len(cleanupErrs) > 0 {
+		// Log all errors but only return a summary to avoid overwhelming callers
+		log.G(ctx).WithField("error_count", len(cleanupErrs)).Warn("cleanup completed with errors")
+		return fmt.Errorf("cleanup had %d errors, first: %w", len(cleanupErrs), cleanupErrs[0])
 	}
 	return nil
 }
@@ -1140,7 +1119,10 @@ func (s *snapshotter) Usage(ctx context.Context, key string) (_ snapshots.Usage,
 	return usage, nil
 }
 
-// Add a method to verify fsverity
+// verifyFsverity checks if fsverity is enabled on the given path.
+// TODO: integrate this into the commit flow for validation.
+//
+//nolint:unused // Will be used when fsverity validation is integrated
 func (s *snapshotter) verifyFsverity(path string) error {
 	if !s.enableFsverity {
 		return nil

@@ -31,12 +31,15 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/contrib/diffservice"
 	"github.com/containerd/containerd/v2/contrib/snapshotservice"
+	"github.com/containerd/containerd/v2/core/mount/manager"
 	"github.com/containerd/log"
 	"github.com/urfave/cli/v2"
+	bolt "go.etcd.io/bbolt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
 
 	differ "github.com/aledbf/nexuserofs/internal/differ"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 	snapshotter "github.com/aledbf/nexuserofs/internal/snapshotter"
 	"github.com/aledbf/nexuserofs/internal/store"
 )
@@ -48,6 +51,12 @@ const (
 )
 
 func main() {
+	// Run preflight checks early to fail fast
+	if err := preflight.Check(); err != nil {
+		fmt.Fprintf(os.Stderr, "preflight check failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	app := &cli.App{
 		Name:  "nexuserofs-snapshotter",
 		Usage: "External EROFS snapshotter for containerd",
@@ -86,8 +95,8 @@ func main() {
 			},
 			&cli.Int64Flag{
 				Name:    "default-size",
-				Usage:   "Default writable layer size in bytes (0 = directory mode)",
-				Value:   0,
+				Usage:   "Size of ext4 writable layer in bytes (must be > 0)",
+				Value:   64 * 1024 * 1024, // 64 MiB
 				EnvVars: []string{"NEXUSEROFS_DEFAULT_SIZE"},
 			},
 			&cli.BoolFlag{
@@ -203,6 +212,25 @@ func run(cliCtx *cli.Context) error {
 	if opts := cliCtx.StringSlice("mkfs-options"); len(opts) > 0 {
 		differOpts = append(differOpts, differ.WithMkfsOptions(opts))
 	}
+
+	dbPath := filepath.Join(root, "mounts.db")
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		return fmt.Errorf("failed to open mount database: %w", err)
+	}
+	defer db.Close()
+
+	mountRoot := filepath.Join(root, "mounts")
+	mm, err := manager.NewManager(db, mountRoot, manager.WithAllowedRoot(root))
+	if err != nil {
+		return fmt.Errorf("failed to create mount manager: %w", err)
+	}
+	if closer, ok := mm.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+
+	// Add mount manager to differ options for template resolution
+	differOpts = append(differOpts, differ.WithMountManager(mm))
 
 	// Create differ
 	df := differ.NewErofsDiffer(contentStore, differOpts...)

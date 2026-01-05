@@ -24,17 +24,10 @@ import (
 	"github.com/containerd/errdefs"
 )
 
-// defaultWritableSize controls the default writable layer mode.
-//
-// On non-Linux platforms, this is set to 64 MiB to enable "block mode" -
-// an ext4 image file is created for the writable layer. This is required
-// because non-Linux systems typically lack native overlayfs support.
-//
-// The size can be adjusted via the WithDefaultSize option or per-snapshot
-// configuration. Set to 0 to use "directory mode" (Linux-only).
-//
-// See snapshotter_linux.go for the Linux default (0 = directory mode).
-const defaultWritableSize = 64 * 1024 * 1024
+// defaultWritableSize is the default size for the ext4 writable layer.
+// An ext4 image file of this size is created and loop-mounted for each
+// active snapshot's writable layer.
+const defaultWritableSize = 64 * 1024 * 1024 // 64 MiB
 
 func checkCompatibility(root string) error {
 	return nil
@@ -44,16 +37,12 @@ func setImmutable(path string, enable bool) error {
 	return errdefs.ErrNotImplemented
 }
 
-func cleanupUpper(upper string) error {
+func unmountAll(target string) error {
 	return nil
 }
 
-func cleanupActiveMounts(upper string) error {
-	return nil
-}
-
-func cleanupViewMounts(lower string) error {
-	return nil
+func mountErofsLayer(layerPath, mountPoint string) error {
+	return errdefs.ErrNotImplemented
 }
 
 func upperDirectoryPermission(p, parent string) error {

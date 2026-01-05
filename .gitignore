@@ -1,5 +1,6 @@
 # Test binary, built with `go test -c`
 *.test
+!Dockerfile.test
 
 # Code coverage profiles and other test artifacts
 *.out

@@ -87,18 +87,25 @@ func TestNeedsMountManager(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "simple erofs mount - no device options",
+			name: "erofs mount with loop option requires mount manager",
 			mounts: []mount.Mount{
 				{Type: "erofs", Source: "/path/to/layer.erofs", Options: []string{"ro", "loop"}},
 			},
-			expected: false,
+			expected: true,
 		},
 		{
-			name: "multi-device erofs mount - has device options",
+			name: "erofs mount with loop and device options requires mount manager",
 			mounts: []mount.Mount{
-				{Type: "erofs", Source: "/path/to/layer.erofs", Options: []string{"ro", "loop", "device=/path/to/blob1", "device=/path/to/blob2"}},
+				{Type: "erofs", Source: "/path/to/layer.erofs", Options: []string{"ro", "loop", "device=/path/to/blob1"}},
 			},
 			expected: true,
+		},
+		{
+			name: "erofs mount without loop option does not require mount manager",
+			mounts: []mount.Mount{
+				{Type: "erofs", Source: "/path/to/layer.erofs", Options: []string{"ro"}},
+			},
+			expected: false,
 		},
 		{
 			name: "format with nested type",

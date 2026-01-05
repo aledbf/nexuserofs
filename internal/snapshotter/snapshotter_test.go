@@ -256,94 +256,17 @@ func TestSnapshotterOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("WithDirectViewMounts", func(t *testing.T) {
-		config := &SnapshotterConfig{}
-		opt := WithDirectViewMounts()
-		opt(config)
-
-		if !config.directViewMounts {
-			t.Error("expected directViewMounts to be enabled")
-		}
-	})
-}
-
-func TestSnapshotterIsBlockMode(t *testing.T) {
-	tests := []struct {
-		name            string
-		defaultWritable int64
-		want            bool
-	}{
-		{
-			name:            "zero means directory mode",
-			defaultWritable: 0,
-			want:            false,
-		},
-		{
-			name:            "positive means block mode",
-			defaultWritable: 1024 * 1024,
-			want:            true,
-		},
-		{
-			name:            "negative treated as not block mode",
-			defaultWritable: -1,
-			want:            false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &snapshotter{defaultWritable: tc.defaultWritable}
-			got := s.isBlockMode()
-			if got != tc.want {
-				t.Errorf("isBlockMode() = %v, want %v", got, tc.want)
-			}
-		})
-	}
 }
 
 func TestSnapshotterPaths(t *testing.T) {
 	root := "/var/lib/containerd/io.containerd.snapshotter.v1.erofs"
 	s := &snapshotter{root: root}
 
-	t.Run("upperPath", func(t *testing.T) {
-		got := s.upperPath("123")
-		want := filepath.Join(root, "snapshots", "123", "fs")
-		if got != want {
-			t.Errorf("upperPath(123) = %q, want %q", got, want)
-		}
-	})
-
 	t.Run("viewLowerPath", func(t *testing.T) {
 		got := s.viewLowerPath("123")
 		want := filepath.Join(root, "snapshots", "123", "lower")
 		if got != want {
 			t.Errorf("viewLowerPath(123) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("upperDir non-block mode", func(t *testing.T) {
-		s := &snapshotter{root: root, defaultWritable: 0}
-		got := s.upperDir("123")
-		want := filepath.Join(root, "snapshots", "123", "fs")
-		if got != want {
-			t.Errorf("upperDir(123) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("upperDir block mode", func(t *testing.T) {
-		s := &snapshotter{root: root, defaultWritable: 1024}
-		got := s.upperDir("123")
-		want := filepath.Join(root, "snapshots", "123", "fs", "rw", "upper")
-		if got != want {
-			t.Errorf("upperDir(123) = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("workPath", func(t *testing.T) {
-		got := s.workPath("123")
-		want := filepath.Join(root, "snapshots", "123", "work")
-		if got != want {
-			t.Errorf("workPath(123) = %q, want %q", got, want)
 		}
 	})
 

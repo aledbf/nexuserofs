@@ -29,8 +29,6 @@ package erofs
 // Helper functions shared with erofs_differ_linux_test.go and
 // erofs_snapshot_linux_test.go:
 // - newSnapshotter
-// - testMount
-// - findErofs
 // - createTestTarContent
 // - tarHasPath
 // - cloneMounts
@@ -60,6 +58,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/aledbf/nexuserofs/internal/fsverity"
+	"github.com/aledbf/nexuserofs/internal/preflight"
 )
 
 const (
@@ -67,14 +66,128 @@ const (
 	testNestedFileContent = "Nested file content"
 )
 
+// snapshotTestEnv encapsulates the common test environment for snapshot tests.
+// It provides helpers for creating layers, views, and managing cleanup.
+type snapshotTestEnv struct {
+	t            *testing.T
+	tempDir      string
+	snapshotRoot string
+	snapshotter  *snapshotter
+}
+
+// ctx returns the test context.
+func (e *snapshotTestEnv) ctx() context.Context {
+	return e.t.Context()
+}
+
+// newSnapshotTestEnv creates a new test environment with all prerequisites checked.
+// It skips the test if EROFS support is not available.
+func newSnapshotTestEnv(t *testing.T, opts ...Opt) *snapshotTestEnv {
+	t.Helper()
+	testutil.RequiresRoot(t)
+
+	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
+		t.Skipf("could not find mkfs.erofs: %v", err)
+	}
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
+	}
+
+	tempDir := t.TempDir()
+	snapshotRoot := filepath.Join(tempDir, "snapshots")
+
+	s, err := NewSnapshotter(snapshotRoot, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+
+	env := &snapshotTestEnv{
+		t:            t,
+		tempDir:      tempDir,
+		snapshotRoot: snapshotRoot,
+		snapshotter:  snap,
+	}
+
+	t.Cleanup(func() {
+		cleanupAllSnapshots(t.Context(), s)
+		s.Close()
+		mount.UnmountRecursive(snapshotRoot, 0)
+	})
+
+	return env
+}
+
+// createLayer creates and commits a layer with a single file.
+// Returns the commit key for use as a parent.
+func (e *snapshotTestEnv) createLayer(key, parentKey, filename, content string) string {
+	e.t.Helper()
+
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey); err != nil {
+		e.t.Fatalf("failed to prepare %s: %v", key, err)
+	}
+
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
+	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		e.t.Fatalf("failed to write %s: %v", filename, err)
+	}
+
+	commitKey := key + "-commit"
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
+		e.t.Fatalf("failed to commit %s: %v", key, err)
+	}
+
+	return commitKey
+}
+
+// createLayerWithLabels creates and commits a layer with labels and a single file.
+// Returns the commit key for use as a parent.
+func (e *snapshotTestEnv) createLayerWithLabels(key, parentKey, filename, content string, labels map[string]string) string {
+	e.t.Helper()
+
+	if _, err := e.snapshotter.Prepare(e.ctx(), key, parentKey, snapshots.WithLabels(labels)); err != nil {
+		e.t.Fatalf("failed to prepare %s: %v", key, err)
+	}
+
+	id := snapshotID(e.ctx(), e.t, e.snapshotter, key)
+	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		e.t.Fatalf("failed to write %s: %v", filename, err)
+	}
+
+	commitKey := key + "-commit"
+	if err := e.snapshotter.Commit(e.ctx(), commitKey, key); err != nil {
+		e.t.Fatalf("failed to commit %s: %v", key, err)
+	}
+
+	return commitKey
+}
+
+// createView creates a read-only view of a committed snapshot.
+func (e *snapshotTestEnv) createView(key, parentKey string) []mount.Mount {
+	e.t.Helper()
+
+	mounts, err := e.snapshotter.View(e.ctx(), key, parentKey)
+	if err != nil {
+		e.t.Fatalf("failed to create view %s: %v", key, err)
+	}
+
+	return mounts
+}
+
 func newSnapshotter(t *testing.T, opts ...Opt) func(ctx context.Context, root string) (snapshots.Snapshotter, func() error, error) {
 	_, err := exec.LookPath("mkfs.erofs")
 	if err != nil {
 		t.Skipf("could not find mkfs.erofs: %v", err)
 	}
 
-	if !findErofs() {
-		t.Skip("check for erofs kernel support failed, skipping test")
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("check for erofs kernel support failed: %v, skipping test", err)
 	}
 	return func(ctx context.Context, root string) (snapshots.Snapshotter, func() error, error) {
 		snapshotter, err := NewSnapshotter(root, opts...)
@@ -222,20 +335,6 @@ func tarHasPath(ctx context.Context, store content.Store, desc ocispec.Descripto
 	}
 }
 
-func cloneMounts(in []mount.Mount) []mount.Mount {
-	if in == nil {
-		return nil
-	}
-	out := make([]mount.Mount, len(in))
-	for i := range in {
-		out[i] = in[i]
-		if len(in[i].Options) > 0 {
-			out[i].Options = append([]string(nil), in[i].Options...)
-		}
-	}
-	return out
-}
-
 func mountsHaveTemplate(mounts []mount.Mount) bool {
 	for _, m := range mounts {
 		if strings.Contains(m.Source, "{{") || strings.Contains(m.Target, "{{") {
@@ -265,8 +364,8 @@ func snapshotID(ctx context.Context, t *testing.T, s *snapshotter, key string) s
 
 // cleanupAllSnapshots removes all snapshots using only the public Snapshotter interface.
 // Snapshots are removed in reverse order (children first, then parents) to respect
-// the snapshot dependency chain. The Remove method handles internal cleanup of
-// active mounts and directories.
+// the snapshot dependency chain. After removing all snapshots, Cleanup() is called
+// to unmount any remaining EROFS layers and release resources.
 func cleanupAllSnapshots(ctx context.Context, s snapshots.Snapshotter) {
 	var keys []string
 	_ = s.Walk(ctx, func(ctx context.Context, info snapshots.Info) error {
@@ -276,5 +375,9 @@ func cleanupAllSnapshots(ctx context.Context, s snapshots.Snapshotter) {
 	// Remove in reverse order (children first, then parents)
 	for i := len(keys) - 1; i >= 0; i-- {
 		_ = s.Remove(ctx, keys[i])
+	}
+	// Call Cleanup to unmount EROFS layers and release resources
+	if cleaner, ok := s.(interface{ Cleanup(context.Context) error }); ok {
+		_ = cleaner.Cleanup(ctx)
 	}
 }

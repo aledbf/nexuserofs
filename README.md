@@ -33,7 +33,7 @@ flowchart LR
 
 - Linux kernel with EROFS support (5.4+)
 - erofs-utils 1.8+ (mkfs.erofs, fsck.erofs)
-- e2fsprogs (for writable layer block mode)
+- e2fsprogs (mkfs.ext4 for writable layers)
 - util-linux (mount, losetup)
 - containerd 2.2+
 
@@ -115,7 +115,7 @@ Available flags:
 | `--containerd-address` | `/run/containerd/containerd.sock` | containerd socket for content store |
 | `--containerd-namespace` | `default` | containerd namespace |
 | `--log-level` | `info` | Log level (debug, info, warn, error) |
-| `--default-size` | `0` | Default writable layer size in bytes (0 = directory mode) |
+| `--default-size` | `64M` | Size of ext4 writable layer (must be > 0) |
 | `--enable-fsverity` | `false` | Enable fsverity for layer validation |
 | `--set-immutable` | `true` | Set immutable flag on committed layers |
 | `--mkfs-options` | | Extra options for mkfs.erofs |
