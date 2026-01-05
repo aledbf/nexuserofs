@@ -320,6 +320,11 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 	}
 	defer s.Close()
 
+	// Cleanup mounted layers before temp directory removal
+	t.Cleanup(func() {
+		mount.UnmountRecursive(snapshotRoot, 0)
+	})
+
 	snap, ok := s.(*snapshotter)
 	if !ok {
 		t.Fatal("failed to cast snapshotter to *snapshotter")
@@ -764,7 +769,8 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	sn := newSnapshotter(t)
+	// Use fsMergeThreshold=5 so fsmeta is generated with 6 layers
+	sn := newSnapshotter(t, WithFsMergeThreshold(5))
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -777,9 +783,9 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		t.Fatal("failed to cast snapshotter to *snapshotter")
 	}
 
-	// Create 2 layers
+	// Create 6 layers (exceeds threshold=5, so fsmeta will be generated)
 	var parentKey string
-	for i := range 2 {
+	for i := range 6 {
 		key := fmt.Sprintf("layer-%d", i)
 		commitKey := fmt.Sprintf("layer-%d-commit", i)
 
@@ -797,6 +803,9 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		}
 		parentKey = commitKey
 	}
+
+	// Wait for fsmeta generation (runs asynchronously after commit)
+	time.Sleep(500 * time.Millisecond)
 
 	// Create a View
 	viewKey := "idempotent-test-view"
@@ -816,7 +825,7 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		t.Fatalf("inconsistent mount counts: first=%d, second=%d", len(mounts1), len(mounts2))
 	}
 
-	// Both should be EROFS descriptors
+	// Both should be EROFS mounts (fsmeta merged)
 	if mounts1[0].Type != testTypeErofs || mounts2[0].Type != testTypeErofs {
 		t.Fatalf("expected both to be erofs type, got: %s and %s", mounts1[0].Type, mounts2[0].Type)
 	}

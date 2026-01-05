@@ -187,7 +187,7 @@ func (s *snapshotter) Close() error {
 	return s.ms.Close()
 }
 
-// cleanupBlockMounts unmounts any ext4 rw mounts.
+// cleanupBlockMounts unmounts any ext4 rw mounts and layer mounts.
 // Errors are logged but not returned since this is best-effort cleanup.
 func (s *snapshotter) cleanupBlockMounts() {
 	snapshotsDir := filepath.Join(s.root, "snapshots")
@@ -207,6 +207,12 @@ func (s *snapshotter) cleanupBlockMounts() {
 		rwDir := filepath.Join(snapshotDir, "rw")
 		if err := unmountAll(rwDir); err != nil {
 			log.L.WithError(err).WithField("path", rwDir).Debug("failed to cleanup block rw mount during close")
+		}
+
+		// Cleanup layer mounts (EROFS loop mounts used for views)
+		layersDir := filepath.Join(snapshotDir, "layers")
+		if err := mount.UnmountRecursive(layersDir, 0); err != nil {
+			log.L.WithError(err).WithField("path", layersDir).Debug("failed to cleanup layer mounts during close")
 		}
 	}
 }
@@ -361,10 +367,19 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 
 	// View snapshots - read-only access to committed layers
 	if snap.Kind == snapshots.KindView {
-		// Views must have at least one parent (the committed layer being viewed).
-		// This is enforced by containerd storage, but check defensively.
+		// View with no parent: return read-only bind mount to empty fs directory
 		if len(snap.ParentIDs) == 0 {
-			return nil, fmt.Errorf("view snapshot has no parents: snapshot may be corrupted")
+			fsPath := s.viewLowerPath(snap.ID)
+			if err := os.MkdirAll(fsPath, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create view fs directory: %w", err)
+			}
+			return []mount.Mount{
+				{
+					Source:  fsPath,
+					Type:    "bind",
+					Options: []string{"ro", "rbind"},
+				},
+			}, nil
 		}
 		// Single-layer View: return EROFS mount directly.
 		// Overlay with single lowerdir and no upperdir/workdir is invalid in Linux.
