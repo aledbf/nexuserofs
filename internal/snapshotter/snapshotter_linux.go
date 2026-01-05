@@ -169,6 +169,16 @@ func upperDirectoryPermission(p, parent string) error {
 // mountErofsLayer mounts an EROFS layer at the specified mount point using a loop device.
 // The mount is read-only. Returns nil if already mounted or if mounting succeeds.
 func mountErofsLayer(layerPath, mountPoint string) error {
+	return mountErofsWithOptions(mount.Mount{
+		Type:    "erofs",
+		Source:  layerPath,
+		Options: []string{"ro", "loop"},
+	}, mountPoint)
+}
+
+// mountErofsWithOptions mounts an EROFS image with custom options.
+// Used for fsmeta mounts that need device= options for multi-device support.
+func mountErofsWithOptions(m mount.Mount, mountPoint string) error {
 	if err := os.MkdirAll(mountPoint, 0755); err != nil {
 		return fmt.Errorf("failed to create mount point: %w", err)
 	}
@@ -182,14 +192,8 @@ func mountErofsLayer(layerPath, mountPoint string) error {
 		return nil // Already mounted, nothing to do
 	}
 
-	m := mount.Mount{
-		Type:    "erofs",
-		Source:  layerPath,
-		Options: []string{"ro", "loop"},
-	}
-
 	if err := m.Mount(mountPoint); err != nil {
-		return fmt.Errorf("failed to mount EROFS layer %s at %s: %w", layerPath, mountPoint, err)
+		return fmt.Errorf("failed to mount EROFS layer %s at %s: %w", m.Source, mountPoint, err)
 	}
 
 	return nil

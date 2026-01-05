@@ -620,9 +620,12 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	upperMounts := env.prepareActiveLayer(testKeyUpper, parentKey, "upper.txt", "upper")
 	lowerMounts := env.createView(testKeyLower, parentKey)
 
-	// Multi-layer views return a single overlay mount
-	if len(lowerMounts) != 1 || lowerMounts[0].Type != testTypeOverlay {
-		t.Fatalf("expected 1 overlay mount, got: %#v", lowerMounts)
+	// Multi-layer views return a single mount (erofs with fsmeta, or overlay without)
+	if len(lowerMounts) != 1 {
+		t.Fatalf("expected 1 mount, got: %#v", lowerMounts)
+	}
+	if lowerMounts[0].Type != testTypeErofs && lowerMounts[0].Type != testTypeOverlay {
+		t.Fatalf("expected erofs or overlay mount, got: %#v", lowerMounts)
 	}
 
 	mm := env.createMountManager()

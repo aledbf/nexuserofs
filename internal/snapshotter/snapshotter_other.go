@@ -45,6 +45,10 @@ func mountErofsLayer(layerPath, mountPoint string) error {
 	return errdefs.ErrNotImplemented
 }
 
+func mountErofsWithOptions(m mount.Mount, mountPoint string) error {
+	return errdefs.ErrNotImplemented
+}
+
 func upperDirectoryPermission(p, parent string) error {
 	return nil
 }

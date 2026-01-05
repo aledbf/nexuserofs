@@ -352,7 +352,10 @@ func (s *snapshotter) prepareDirectory(snapshotDir string, kind snapshots.Kind) 
 }
 
 func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, bool) {
-	// fsmeta merging is not supported in block mode
+	// fsmeta mounting is disabled because the kernel EROFS driver's device=
+	// option requires pre-setup loop devices, not file paths. The fsmeta files
+	// are still generated for potential future use (e.g., when containerd's
+	// mount manager gains support for setting up multi-device EROFS mounts).
 	return mount.Mount{}, false
 }
 
@@ -574,14 +577,11 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 
 // activeMounts returns mounts for active (writable) snapshots.
 // Mounts all parent layers and returns an overlay with writable upper.
+// Note: fsmeta is NOT used for active mounts because the kernel's EROFS
+// device= option requires loop devices to be pre-setup, which we can't do
+// when mounting ourselves. For views, we return mount specs that containerd
+// can mount using its mount manager with proper loop device setup.
 func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	// Check if we have a merged fsmeta that collapses all layers into one
-	if s.fsMergeThreshold > 0 {
-		if m, ok := s.mountFsMeta(snap, 0); ok {
-			return s.activeOverlayMounts(snap, []string{m.Source}, true)
-		}
-	}
-
 	// Get EROFS layer paths
 	layerPaths, err := s.getErofsLayerPaths(snap)
 	if err != nil {

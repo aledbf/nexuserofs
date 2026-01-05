@@ -769,8 +769,7 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
-	// Use fsMergeThreshold=5 so fsmeta is generated with 6 layers
-	sn := newSnapshotter(t, WithFsMergeThreshold(5))
+	sn := newSnapshotter(t)
 	snapshtr, cleanup, err := sn(ctx, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -783,9 +782,9 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		t.Fatal("failed to cast snapshotter to *snapshotter")
 	}
 
-	// Create 6 layers (exceeds threshold=5, so fsmeta will be generated)
+	// Create 2 layers
 	var parentKey string
-	for i := range 6 {
+	for i := range 2 {
 		key := fmt.Sprintf("layer-%d", i)
 		commitKey := fmt.Sprintf("layer-%d-commit", i)
 
@@ -803,9 +802,6 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		}
 		parentKey = commitKey
 	}
-
-	// Wait for fsmeta generation (runs asynchronously after commit)
-	time.Sleep(500 * time.Millisecond)
 
 	// Create a View
 	viewKey := "idempotent-test-view"
@@ -825,9 +821,9 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		t.Fatalf("inconsistent mount counts: first=%d, second=%d", len(mounts1), len(mounts2))
 	}
 
-	// Both should be EROFS mounts (fsmeta merged)
-	if mounts1[0].Type != testTypeErofs || mounts2[0].Type != testTypeErofs {
-		t.Fatalf("expected both to be erofs type, got: %s and %s", mounts1[0].Type, mounts2[0].Type)
+	// Both mount types should be consistent
+	if mounts1[0].Type != mounts2[0].Type {
+		t.Fatalf("inconsistent mount types: first=%s, second=%s", mounts1[0].Type, mounts2[0].Type)
 	}
 
 	// Source paths should be identical
@@ -835,29 +831,14 @@ func TestErofsViewMountsIdempotent(t *testing.T) {
 		t.Fatalf("inconsistent source:\n  first:  %s\n  second: %s", mounts1[0].Source, mounts2[0].Source)
 	}
 
-	// Device options should be identical
-	getDeviceOptions := func(mounts []mount.Mount) []string {
-		var devices []string
-		for _, m := range mounts {
-			for _, opt := range m.Options {
-				if strings.HasPrefix(opt, "device=") {
-					devices = append(devices, opt)
-				}
-			}
-		}
-		return devices
+	// Options should be identical
+	if len(mounts1[0].Options) != len(mounts2[0].Options) {
+		t.Fatalf("inconsistent options count: first=%d, second=%d", len(mounts1[0].Options), len(mounts2[0].Options))
 	}
 
-	devices1 := getDeviceOptions(mounts1)
-	devices2 := getDeviceOptions(mounts2)
-
-	if len(devices1) != len(devices2) {
-		t.Fatalf("inconsistent device count: first=%d, second=%d", len(devices1), len(devices2))
-	}
-
-	for i := range devices1 {
-		if devices1[i] != devices2[i] {
-			t.Fatalf("inconsistent device[%d]:\n  first:  %s\n  second: %s", i, devices1[i], devices2[i])
+	for i := range mounts1[0].Options {
+		if mounts1[0].Options[i] != mounts2[0].Options[i] {
+			t.Fatalf("inconsistent option[%d]:\n  first:  %s\n  second: %s", i, mounts1[0].Options[i], mounts2[0].Options[i])
 		}
 	}
 }
