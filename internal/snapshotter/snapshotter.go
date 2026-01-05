@@ -52,6 +52,10 @@ type SnapshotterConfig struct {
 	defaultSize int64
 	// fsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
 	fsMergeThreshold uint
+	// directViewMounts enables mounting EROFS layers directly for View snapshots,
+	// returning real paths instead of template-based mounts. This is required for
+	// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
+	directViewMounts bool
 }
 
 // Opt is an option to configure the erofs snapshotter
@@ -92,6 +96,17 @@ func WithFsMergeThreshold(v uint) Opt {
 	}
 }
 
+// WithDirectViewMounts enables mounting EROFS layers directly for View snapshots,
+// returning real paths instead of template-based mounts. This is required for
+// standard containerd operations like 'nerdctl commit' that don't use a mount manager.
+// When disabled (default), View snapshots with multiple layers return template-based
+// mounts that require a mount manager for resolution.
+func WithDirectViewMounts() Opt {
+	return func(config *SnapshotterConfig) {
+		config.directViewMounts = true
+	}
+}
+
 type MetaStore interface {
 	TransactionContext(ctx context.Context, writable bool) (context.Context, storage.Transactor, error)
 	WithTransaction(ctx context.Context, writable bool, fn storage.TransactionCallback) error
@@ -106,6 +121,7 @@ type snapshotter struct {
 	setImmutable     bool
 	defaultWritable  int64
 	fsMergeThreshold uint
+	directViewMounts bool
 }
 
 // isBlockMode returns true if the snapshotter uses block-based writable layers
@@ -177,6 +193,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		setImmutable:     config.setImmutable,
 		defaultWritable:  config.defaultSize,
 		fsMergeThreshold: config.fsMergeThreshold,
+		directViewMounts: config.directViewMounts,
 	}, nil
 }
 
@@ -324,11 +341,12 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		return s.templateMounts(snap)
 	}
 
-	// For KindView snapshots with multiple layers, mount the layers and return
-	// real paths. This is needed because standard containerd operations like
-	// 'nerdctl commit' don't use a mount manager that understands the template
-	// syntax used by templateMounts().
-	if snap.Kind == snapshots.KindView && len(snap.ParentIDs) > 1 {
+	// For KindView snapshots with multiple layers, optionally mount the layers and
+	// return real paths. This is needed for standard containerd operations like
+	// 'nerdctl commit' that don't use a mount manager that understands template syntax.
+	// When directViewMounts is false (default), templates are returned for use with
+	// mount managers (e.g., differ workflow, VM runtimes).
+	if s.directViewMounts && snap.Kind == snapshots.KindView && len(snap.ParentIDs) > 1 {
 		return s.viewMounts(snap)
 	}
 
