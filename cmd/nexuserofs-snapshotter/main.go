@@ -131,11 +131,6 @@ func main() {
 				Usage:   "Extra options for mkfs.erofs",
 				EnvVars: []string{"NEXUSEROFS_MKFS_OPTIONS"},
 			},
-			&cli.StringSliceFlag{
-				Name:    "overlay-options",
-				Usage:   "Extra options for overlay mounts",
-				EnvVars: []string{"NEXUSEROFS_OVERLAY_OPTIONS"},
-			},
 		},
 		Action: run,
 	}
@@ -189,9 +184,6 @@ func run(cliCtx *cli.Context) error {
 	}
 	if cliCtx.Bool("set-immutable") {
 		snapshotterOpts = append(snapshotterOpts, snapshotter.WithImmutable())
-	}
-	if opts := cliCtx.StringSlice("overlay-options"); len(opts) > 0 {
-		snapshotterOpts = append(snapshotterOpts, snapshotter.WithOvlOptions(opts))
 	}
 
 	// Create snapshotter
