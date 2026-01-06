@@ -522,63 +522,63 @@ func mountErofsView(t *testing.T, mounts []mount.Mount, target string) func() {
 	return cleanup
 }
 
-// createOverlayViewForCompare creates an overlay mount at target that combines
-// parent EROFS layer(s) with the upper directory. This is needed because
+// createOverlayViewForCompareWithMountedLower creates an overlay mount at target that combines
+// an already-mounted lower directory with the upper directory. This is needed because
 // archive.WriteDiff expects to see the full desired state, not just the new files.
 // Returns a cleanup function to unmount everything.
-func createOverlayViewForCompare(t *testing.T, parentMounts []mount.Mount, upperDir, target string) func() {
+func createOverlayViewForCompareWithMountedLower(t *testing.T, lowerDir, upperDir, target string) func() {
 	t.Helper()
-
-	if len(parentMounts) == 0 {
-		t.Fatal("no parent mounts provided")
-	}
-
-	// Mount the parent EROFS layer(s) to use as lowerdir
-	parentMount := t.TempDir()
-	parentCleanup := mountErofsView(t, parentMounts, parentMount)
 
 	// Create workdir for overlay in the same filesystem as upperdir
 	// (overlay requires upperdir and workdir to be on the same filesystem)
 	// The upperDir is inside the mounted ext4 at /rw/upper, so workdir goes at /rw/work
 	workdir := filepath.Join(filepath.Dir(upperDir), "work")
 	if err := os.MkdirAll(workdir, 0755); err != nil {
-		parentCleanup()
 		t.Fatalf("failed to create workdir: %v", err)
 	}
 
-	// Create overlay with parent as lowerdir and rw/upper as upperdir
+	// Create overlay with lower as lowerdir and rw/upper as upperdir
 	// Note: We use the parent's contents as lowerdir so the diff only sees new/modified files
-	overlayOpts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", parentMount, upperDir, workdir)
+	overlayOpts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workdir)
 	args := []string{"-t", "overlay", "-o", overlayOpts, "overlay", target}
 	cmd := exec.Command("mount", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		parentCleanup()
 		t.Fatalf("failed to mount overlay for compare: %v: %s", err, out)
 	}
 
 	return func() {
 		exec.Command("umount", target).Run()
-		parentCleanup()
 	}
+}
+
+// mountErofsLayersResult contains the result of mounting EROFS layers.
+type mountErofsLayersResult struct {
+	layerDirs      []string // Directories where each layer is mounted
+	overlayMounted bool     // Whether overlay was successfully mounted at target
+	cleanup        func()   // Cleanup function
 }
 
 // mountErofsLayersWithOverlay mounts multiple individual EROFS layers and creates
 // an overlay to combine them. This is used when fsmeta merge fails and we fall back
 // to individual layer mounts.
-// Returns a cleanup function to unmount everything.
-func mountErofsLayersWithOverlay(t *testing.T, layers []mount.Mount, target string) func() {
+// Returns mountErofsLayersResult with layer directories and cleanup function.
+func mountErofsLayersWithOverlay(t *testing.T, layers []mount.Mount, target string) mountErofsLayersResult {
 	t.Helper()
 
 	if len(layers) == 0 {
 		t.Fatal("no layers to mount")
 	}
 
-	// Mount each EROFS layer at a separate temp directory
+	// Create a single base directory for all layer mounts
+	// This ensures all lowerdirs are on the same filesystem (required by overlay)
+	baseDir := t.TempDir()
+
+	// Mount each EROFS layer at a separate subdirectory
 	var layerDirs []string
 	var loopDevices []*loop.Device
 
 	for i, m := range layers {
-		layerDir := filepath.Join(t.TempDir(), fmt.Sprintf("layer%d", i))
+		layerDir := filepath.Join(baseDir, fmt.Sprintf("layer%d", i))
 		if err := os.MkdirAll(layerDir, 0755); err != nil {
 			t.Fatalf("failed to create layer dir: %v", err)
 		}
@@ -625,32 +625,56 @@ func mountErofsLayersWithOverlay(t *testing.T, layers []mount.Mount, target stri
 		}
 	}
 
-	// Create workdir and upperdir for the overlay (required even for read-only)
-	// Actually for read-only overlay we don't need upperdir/workdir, just use lowerdir
-	overlayOpts := fmt.Sprintf("lowerdir=%s", lowerdir)
+	// Ensure target directory exists
+	if err := os.MkdirAll(target, 0755); err != nil {
+		for _, dir := range layerDirs {
+			exec.Command("umount", dir).Run()
+		}
+		for _, l := range loopDevices {
+			l.Detach()
+		}
+		t.Fatalf("failed to create target dir: %v", err)
+	}
+
+	// Create a read-only overlay with all layers as lowerdirs
+	// Use index=off and metacopy=off for compatibility with older kernels
+	overlayOpts := fmt.Sprintf("lowerdir=%s,index=off,metacopy=off", lowerdir)
 	args := []string{"-t", "overlay", "-o", overlayOpts, "overlay", target}
 	cmd := exec.Command("mount", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Cleanup on failure
-		for _, dir := range layerDirs {
-			exec.Command("umount", dir).Run()
+		// If overlay mount fails, DON'T cleanup - keep layers mounted for individual verification
+		t.Logf("overlay mount failed (may need kernel support): %v: %s", err, out)
+		t.Logf("verifying files in individual layers instead of overlay")
+
+		return mountErofsLayersResult{
+			layerDirs:      layerDirs,
+			overlayMounted: false,
+			cleanup: func() {
+				// Cleanup when test is done
+				for _, dir := range layerDirs {
+					exec.Command("umount", dir).Run()
+				}
+				for _, l := range loopDevices {
+					l.Detach()
+				}
+			},
 		}
-		for _, l := range loopDevices {
-			l.Detach()
-		}
-		t.Fatalf("failed to mount overlay: %v: %s", err, out)
 	}
 
-	return func() {
-		// Unmount overlay first
-		exec.Command("umount", target).Run()
-		// Unmount each layer
-		for _, dir := range layerDirs {
-			exec.Command("umount", dir).Run()
-		}
-		// Detach loop devices
-		for _, l := range loopDevices {
-			l.Detach()
-		}
+	return mountErofsLayersResult{
+		layerDirs:      layerDirs,
+		overlayMounted: true,
+		cleanup: func() {
+			// Unmount overlay first
+			exec.Command("umount", target).Run()
+			// Unmount each layer
+			for _, dir := range layerDirs {
+				exec.Command("umount", dir).Run()
+			}
+			// Detach loop devices
+			for _, l := range loopDevices {
+				l.Detach()
+			}
+		},
 	}
 }

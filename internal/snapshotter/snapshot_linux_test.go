@@ -199,15 +199,26 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		}
 		_ = expectMulti // fsmeta consolidation handles both single and multi-layer
 
-		// Skip if containerd mount manager can't handle fsmeta multi-device
-		skipIfErofsMultiDevice(t, lowerMounts)
+		// For Compare, we need to mount both lower and upper manually because:
+		// 1. Lower may have multi-device fsmeta (device= options) which containerd mount manager doesn't support
+		// 2. Upper needs to show the full overlay view (parent content + new files)
+		//
+		// Mount the lower EROFS layer(s) first
+		lowerTarget := t.TempDir()
+		lowerCleanup := mountErofsView(t, lowerMounts, lowerTarget)
+		defer lowerCleanup()
 
-		// For Compare, we need the upper mount to show the full overlay view
-		// (parent content + new files), not just the bare rw/upper directory.
-		// This is because archive.WriteDiff expects to compare complete filesystem states.
-		// Create an overlay with parent EROFS as lowerdir and rw/upper as upperdir.
+		// Create a bind mount to the lower view for Compare
+		lowerBindMounts := []mount.Mount{{
+			Type:    "bind",
+			Source:  lowerTarget,
+			Options: []string{"ro", "rbind"},
+		}}
+
+		// Create an overlay with lower EROFS as lowerdir and rw/upper as upperdir
+		// This shows the full desired state (parent content + new files)
 		overlayViewTarget := t.TempDir()
-		overlayCleanup := createOverlayViewForCompare(t, lowerMounts, snap.blockUpperPath(upperID), overlayViewTarget)
+		overlayCleanup := createOverlayViewForCompareWithMountedLower(t, lowerTarget, snap.blockUpperPath(upperID), overlayViewTarget)
 		defer overlayCleanup()
 
 		// Create a bind mount to the overlay view for Compare
@@ -217,7 +228,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 			Options: []string{"ro", "rbind"},
 		}}
 
-		desc, err := differ.Compare(ctx, lowerMounts, overlayMounts)
+		desc, err := differ.Compare(ctx, lowerBindMounts, overlayMounts)
 		if err != nil {
 			t.Fatalf("Compare failed: %v", err)
 		}
@@ -281,13 +292,19 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 
 		// When fsmeta merge fails, we get multiple individual EROFS mounts.
 		// Mount each layer separately and create an overlay to verify contents.
+		var layerDirs []string
+		var overlayMounted bool
+
 		if len(erofsLayers) > 1 && !hasFsmetaMount {
 			t.Logf("fsmeta merge failed, mounting %d individual EROFS layers with overlay", len(erofsLayers))
-			cleanup := mountErofsLayersWithOverlay(t, erofsLayers, viewTarget)
-			t.Cleanup(cleanup)
+			result := mountErofsLayersWithOverlay(t, erofsLayers, viewTarget)
+			t.Cleanup(result.cleanup)
+			layerDirs = result.layerDirs
+			overlayMounted = result.overlayMounted
 		} else if len(erofsLayers) > 0 {
 			cleanup := mountErofsView(t, viewMounts, viewTarget)
 			t.Cleanup(cleanup)
+			overlayMounted = true
 		} else {
 			// Direct mount for overlay mounts
 			if err := mount.All(viewMounts, viewTarget); err != nil {
@@ -298,15 +315,47 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 					t.Logf("failed to unmount view: %v", err)
 				}
 			})
+			overlayMounted = true
 		}
-		verifyFiles(viewTarget, baseFiles)
-		if midFiles != nil {
-			verifyFiles(viewTarget, midFiles)
+
+		// Verify files - either from overlay mount or individual layers
+		if overlayMounted {
+			verifyFiles(viewTarget, baseFiles)
+			if midFiles != nil {
+				verifyFiles(viewTarget, midFiles)
+			}
+			if topFiles != nil {
+				verifyFiles(viewTarget, topFiles)
+			}
+			verifyFiles(viewTarget, upperFiles)
+		} else {
+			// Overlay mount failed - verify files exist in individual layers
+			// Layer 0 = newest (upper), Layer N-1 = oldest (base)
+			allFiles := []map[string]string{upperFiles}
+			if topFiles != nil {
+				allFiles = append(allFiles, topFiles)
+			}
+			if midFiles != nil {
+				allFiles = append(allFiles, midFiles)
+			}
+			allFiles = append(allFiles, baseFiles)
+
+			for i, files := range allFiles {
+				if i >= len(layerDirs) {
+					t.Fatalf("not enough layers: need %d, have %d", i+1, len(layerDirs))
+				}
+				for name, content := range files {
+					data, err := os.ReadFile(filepath.Join(layerDirs[i], name))
+					if err != nil {
+						t.Fatalf("layer %d: failed to read %s: %v", i, name, err)
+					}
+					if string(data) != content {
+						t.Fatalf("layer %d: expected %s content %q, got %q", i, name, content, string(data))
+					}
+				}
+				t.Logf("layer %d verified: %v", i, files)
+			}
 		}
-		if topFiles != nil {
-			verifyFiles(viewTarget, topFiles)
-		}
-		verifyFiles(viewTarget, upperFiles)
 	}
 
 	t.Run("single-layer", func(t *testing.T) {
