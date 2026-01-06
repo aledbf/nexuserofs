@@ -47,10 +47,7 @@ type MountManagerResolver func() mount.Manager
 type ErofsDiff struct {
 	store         content.Store
 	mkfsExtraOpts []string
-	// enableTarIndex enables generating tar index for tar content
-	// instead of fully converting the tar to EROFS format
-	enableTarIndex bool
-	mmResolver     MountManagerResolver
+	mmResolver    MountManagerResolver
 }
 
 // DifferOpt is an option for configuring the erofs differ
@@ -60,13 +57,6 @@ type DifferOpt func(d *ErofsDiff)
 func WithMkfsOptions(opts []string) DifferOpt {
 	return func(d *ErofsDiff) {
 		d.mkfsExtraOpts = opts
-	}
-}
-
-// WithTarIndexMode enables tar index mode for EROFS layers
-func WithTarIndexMode() DifferOpt {
-	return func(d *ErofsDiff) {
-		d.enableTarIndex = true
 	}
 }
 
@@ -193,20 +183,12 @@ func (s *ErofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts [
 		r: io.TeeReader(processor, digester.Hash()),
 	}
 
-	// Choose between tar index or tar conversion mode
-	if s.enableTarIndex {
-		// Use the tar index method: generate tar index and append tar
-		err = erofsutils.GenerateTarIndexAndAppendTar(ctx, rc, layerBlobPath, s.mkfsExtraOpts)
-		if err != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("failed to generate tar index: %w", err)
-		}
-	} else {
-		// Use the tar method: fully convert tar to EROFS
-		u := uuid.NewSHA1(uuid.NameSpaceURL, []byte("erofs:blobs/"+desc.Digest))
-		err = erofsutils.ConvertTarErofs(ctx, rc, layerBlobPath, u.String(), s.mkfsExtraOpts)
-		if err != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("failed to convert tar to erofs: %w", err)
-		}
+	// Use full conversion mode (--tar=f): converts tar to EROFS with 4096-byte blocks
+	// This creates layers compatible with fsmeta merge for multi-layer images
+	u := uuid.NewSHA1(uuid.NameSpaceURL, []byte("erofs:blobs/"+desc.Digest))
+	err = erofsutils.ConvertTarErofs(ctx, rc, layerBlobPath, u.String(), s.mkfsExtraOpts)
+	if err != nil {
+		return ocispec.Descriptor{}, fmt.Errorf("failed to convert tar to erofs: %w", err)
 	}
 
 	// Read any trailing data

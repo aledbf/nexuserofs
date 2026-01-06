@@ -117,7 +117,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 		mount.UnmountRecursive(mountRoot, 0)
 	})
 
-	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm), erofsdiffer.WithTarIndexMode())
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 
 	writeFiles := func(dir string, files map[string]string) error {
 		for name, content := range files {

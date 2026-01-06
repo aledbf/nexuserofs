@@ -23,7 +23,7 @@ package erofs
 // with various mount configurations.
 //
 // Tests in this file:
-// - TestErofsDifferWithTarIndexMode
+// - TestErofsDifferApply
 // - TestErofsDifferCompareWithMountManager
 // - TestErofsDifferCompareBlockUpperFallback
 // - TestErofsDifferComparePreservesWhiteouts
@@ -333,7 +333,7 @@ func (e *differTestEnv) compareAndVerify(differ *erofsdiffer.ErofsDiff, lower, u
 	return desc
 }
 
-func TestErofsDifferWithTarIndexMode(t *testing.T) {
+func TestErofsDifferApply(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
 
@@ -341,10 +341,10 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 		t.Skipf("EROFS support check failed: %v", err)
 	}
 
-	// Check if mkfs.erofs supports tar index mode
+	// Check if mkfs.erofs supports tar conversion mode (--tar=f)
 	supported, err := erofsutils.SupportGenerateFromTar()
 	if err != nil || !supported {
-		t.Skip("mkfs.erofs does not support tar mode, skipping tar index test")
+		t.Skip("mkfs.erofs does not support tar conversion mode")
 	}
 
 	tempDir := t.TempDir()
@@ -379,8 +379,8 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 	}
 	t.Cleanup(func() { mount.UnmountRecursive(mountRoot, 0) })
 
-	// Create EROFS differ with tar index mode and mount manager
-	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithTarIndexMode(), erofsdiffer.WithMountManager(mm))
+	// Create EROFS differ with mount manager
+	differ := erofsdiffer.NewErofsDiffer(contentStore, erofsdiffer.WithMountManager(mm))
 
 	// Create test tar content
 	tarReader := createTestTarContent()
@@ -424,13 +424,13 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Apply the tar content using the EROFS differ with tar index mode
+	// Apply the tar content using the EROFS differ
 	appliedDesc, err := differ.Apply(ctx, desc, mounts)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Logf("Applied layer using EROFS differ with tar index mode:")
+	t.Logf("Applied layer using EROFS differ:")
 	t.Logf("  Original: %s (%d bytes)", desc.Digest, desc.Size)
 	t.Logf("  Applied:  %s (%d bytes)", appliedDesc.Digest, appliedDesc.Size)
 	t.Logf("  MediaType: %s", appliedDesc.MediaType)
@@ -469,7 +469,7 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 		t.Fatal("EROFS layer file should not be empty")
 	}
 
-	t.Logf("EROFS layer file created with tar index mode: %s (%d bytes)", layerPath, stat.Size())
+	t.Logf("EROFS layer file created: %s (%d bytes)", layerPath, stat.Size())
 
 	// Create a view to verify the content
 	viewKey := "test-view"
@@ -508,7 +508,7 @@ func TestErofsDifferWithTarIndexMode(t *testing.T) {
 		t.Fatalf("Expected %q, got %q", expectedNested, string(nestedData))
 	}
 
-	t.Logf("Successfully verified EROFS Snapshotter using the differ with tar index mode")
+	t.Logf("Successfully verified EROFS Snapshotter using the differ")
 }
 
 func TestErofsDifferCompareWithMountManager(t *testing.T) {

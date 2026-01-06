@@ -21,9 +21,6 @@ func TestNewErofsDiffer(t *testing.T) {
 		if d == nil {
 			t.Fatal("expected non-nil differ")
 		}
-		if d.enableTarIndex {
-			t.Error("tar index should be disabled by default")
-		}
 		if d.store != nil {
 			t.Error("expected nil store when passed nil")
 		}
@@ -45,13 +42,6 @@ func TestNewErofsDiffer(t *testing.T) {
 			if !found {
 				t.Errorf("expected option %q in mkfsExtraOpts", want)
 			}
-		}
-	})
-
-	t.Run("applies WithTarIndexMode", func(t *testing.T) {
-		d := NewErofsDiffer(nil, WithTarIndexMode())
-		if !d.enableTarIndex {
-			t.Error("expected tar index mode to be enabled")
 		}
 	})
 
@@ -83,12 +73,13 @@ func TestNewErofsDiffer(t *testing.T) {
 	})
 
 	t.Run("combines multiple options", func(t *testing.T) {
+		mm := &mockMountManager{}
 		d := NewErofsDiffer(nil,
 			WithMkfsOptions([]string{"-z", "lz4"}),
-			WithTarIndexMode(),
+			WithMountManager(mm),
 		)
-		if !d.enableTarIndex {
-			t.Error("expected tar index mode")
+		if d.mmResolver == nil {
+			t.Error("expected mount manager resolver")
 		}
 		found := false
 		for _, opt := range d.mkfsExtraOpts {

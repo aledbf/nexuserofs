@@ -120,12 +120,6 @@ func main() {
 				Value:   true,
 				EnvVars: []string{"NEXUSEROFS_SET_IMMUTABLE"},
 			},
-			&cli.BoolFlag{
-				Name:    "tar-index-mode",
-				Usage:   "Use tar index mode for layer conversion (requires erofs-utils 1.8+)",
-				Value:   false,
-				EnvVars: []string{"NEXUSEROFS_TAR_INDEX_MODE"},
-			},
 			&cli.StringSliceFlag{
 				Name:    "mkfs-options",
 				Usage:   "Extra options for mkfs.erofs",
@@ -207,9 +201,6 @@ func run(cliCtx *cli.Context) error {
 
 	// Build differ options
 	var differOpts []differ.DifferOpt
-	if cliCtx.Bool("tar-index-mode") {
-		differOpts = append(differOpts, differ.WithTarIndexMode())
-	}
 	if opts := cliCtx.StringSlice("mkfs-options"); len(opts) > 0 {
 		differOpts = append(differOpts, differ.WithMkfsOptions(opts))
 	}
