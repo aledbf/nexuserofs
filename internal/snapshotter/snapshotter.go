@@ -319,16 +319,25 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 		return mount.Mount{}, false
 	}
 
+	var deviceOptions []string
+	for i := len(snap.ParentIDs) - 1; i >= 0; i-- {
+		blob := s.layerBlobPath(snap.ParentIDs[i])
+		if _, err := os.Stat(blob); err != nil {
+			return mount.Mount{}, false
+		}
+		deviceOptions = append(deviceOptions, "device="+blob)
+	}
+
 	return mount.Mount{
 		Source:  fsmetaFile,
 		Type:    "erofs",
-		Options: []string{"ro"},
+		Options: append([]string{"ro", "loop"}, deviceOptions...),
 	}, true
 }
 
 // mounts returns mount specifications for a snapshot.
-// All mounts are directly usable without requiring mount-manager plugins.
-// EROFS layers are mounted directly and real overlay paths are returned.
+// Mounts use raw file paths for VM consumers; host mounting may require
+// the mount manager to set up loop devices when "loop" is present.
 func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	// Extract snapshots always use bind mount to fs/ directory
 	if isExtractSnapshot(info) {
@@ -405,7 +414,7 @@ func (s *snapshotter) singleLayerMounts(snap storage.Snapshot) ([]mount.Mount, e
 		{
 			Source:  rwLayerPath,
 			Type:    "ext4",
-			Options: []string{"rw"},
+			Options: []string{"rw", "loop"},
 		},
 	}, nil
 }
@@ -509,7 +518,7 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 		mounts = append(mounts, mount.Mount{
 			Source:  layerPath,
 			Type:    "erofs",
-			Options: []string{"ro"},
+			Options: []string{"ro", "loop"},
 		})
 	}
 
@@ -534,7 +543,7 @@ func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error)
 		mounts = append(mounts, mount.Mount{
 			Source:  layerPath,
 			Type:    "erofs",
-			Options: []string{"ro"},
+			Options: []string{"ro", "loop"},
 		})
 	}
 
@@ -543,7 +552,7 @@ func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error)
 	mounts = append(mounts, mount.Mount{
 		Source:  rwLayerPath,
 		Type:    "ext4",
-		Options: []string{"rw"},
+		Options: []string{"rw", "loop"},
 	})
 
 	return mounts, nil

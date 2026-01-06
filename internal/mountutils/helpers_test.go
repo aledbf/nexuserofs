@@ -94,6 +94,13 @@ func TestNeedsMountManager(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "ext4 mount with loop option requires mount manager",
+			mounts: []mount.Mount{
+				{Type: "ext4", Source: "/path/to/upper.img", Options: []string{"rw", "loop"}},
+			},
+			expected: true,
+		},
+		{
 			name: "erofs mount with loop and device options requires mount manager",
 			mounts: []mount.Mount{
 				{Type: "erofs", Source: "/path/to/layer.erofs", Options: []string{"ro", "loop", "device=/path/to/blob1"}},

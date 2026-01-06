@@ -30,7 +30,7 @@ import (
 
 // NeedsMountManager returns true if any mount requires the mount manager to resolve.
 // This includes mounts with template syntax (e.g., "{{ mount 0 }}"), formatted mounts
-// (format/, mkfs/, mkdir/), and EROFS mounts with loop option (which require loop device setup).
+// (format/, mkfs/, mkdir/), and mounts with loop options (which require loop device setup).
 func NeedsMountManager(mounts []mount.Mount) bool {
 	for _, m := range mounts {
 		if HasTemplate(m) {
@@ -40,9 +40,9 @@ func NeedsMountManager(mounts []mount.Mount) bool {
 		if mt == "format" || mt == "mkfs" || mt == "mkdir" {
 			return true
 		}
-		// EROFS mounts with loop option require the mount manager to set up loop devices.
+		// Mounts with loop option require the mount manager to set up loop devices.
 		// The standard mount syscall cannot handle the "loop" option directly.
-		if mt == "erofs" && hasLoopOption(m.Options) {
+		if hasLoopOption(m.Options) {
 			return true
 		}
 	}
