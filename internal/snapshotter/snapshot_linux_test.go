@@ -199,11 +199,9 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 					t.Fatalf("mount %d: expected erofs type, got: %s", i, m.Type)
 				}
 			}
-		} else {
+		} else if len(lowerMounts) != 1 || mountutils.TypeSuffix(lowerMounts[0].Type) != testTypeErofs {
 			// Single-layer: expect single EROFS mount directly
-			if len(lowerMounts) != 1 || mountutils.TypeSuffix(lowerMounts[0].Type) != testTypeErofs {
-				t.Fatalf("expected single EROFS mount, got: %#v", lowerMounts)
-			}
+			t.Fatalf("expected single EROFS mount, got: %#v", lowerMounts)
 		}
 		desc, err := differ.Compare(ctx, lowerMounts, upperMounts)
 		if err != nil {

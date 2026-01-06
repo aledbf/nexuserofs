@@ -319,9 +319,11 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 		return mount.Mount{}, false
 	}
 
+	// Collect device options in newest-to-oldest order (same as ParentIDs order).
+	// This matches the layer order expected by EROFS multidev mode.
 	var deviceOptions []string
-	for i := len(snap.ParentIDs) - 1; i >= 0; i-- {
-		blob := s.layerBlobPath(snap.ParentIDs[i])
+	for _, parentID := range snap.ParentIDs {
+		blob := s.layerBlobPath(parentID)
 		if _, err := os.Stat(blob); err != nil {
 			return mount.Mount{}, false
 		}
@@ -526,25 +528,31 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 }
 
 // activeMounts returns mounts for active (writable) snapshots.
-// Returns EROFS mounts for read-only lower layers plus ext4 block device for writable upper.
-// the consumer converts these to virtio-blk devices and handles overlay inside the VM.
+// Returns EROFS mount(s) for read-only lower layers plus ext4 block device for writable upper.
+// When fsmeta+vmdk exists, returns single merged EROFS mount (reduces virtio-blk device count).
+// The consumer converts these to virtio-blk devices and handles overlay inside the VM.
 func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	var mounts []mount.Mount
 
-	// Get EROFS layer paths for read-only lower layers
-	layerPaths, err := s.getErofsLayerPaths(snap)
-	if err != nil {
-		return nil, err
-	}
+	// Try to use merged fsmeta for read-only layers (reduces device count)
+	if m, ok := s.mountFsMeta(snap); ok {
+		mounts = append(mounts, m)
+	} else {
+		// Fallback to individual layer mounts
+		layerPaths, err := s.getErofsLayerPaths(snap)
+		if err != nil {
+			return nil, err
+		}
 
-	// Add EROFS mounts for each lower layer
-	// ParentIDs are ordered from newest (immediate parent) to oldest (root).
-	for _, layerPath := range layerPaths {
-		mounts = append(mounts, mount.Mount{
-			Source:  layerPath,
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
-		})
+		// Add EROFS mounts for each lower layer
+		// ParentIDs are ordered from newest (immediate parent) to oldest (root).
+		for _, layerPath := range layerPaths {
+			mounts = append(mounts, mount.Mount{
+				Source:  layerPath,
+				Type:    "erofs",
+				Options: []string{"ro", "loop"},
+			})
+		}
 	}
 
 	// Add the writable ext4 block device as the last mount
@@ -738,42 +746,44 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, snapIDs []string) {
 
 	t1 := time.Now()
 	mergedMeta := s.fsMetaPath(snapIDs[0])
+	vmdkFile := s.vmdkPath(snapIDs[0])
+
 	// If the empty placeholder cannot be created (mainly due to os.IsExist), just return
 	if _, err := os.OpenFile(mergedMeta, os.O_CREATE|os.O_EXCL, 0600); err != nil {
 		return
 	}
 
-	for i := len(snapIDs) - 1; i >= 0; i-- {
-		blob := s.layerBlobPath(snapIDs[i])
+	// Cleanup on failure
+	defer func() {
+		if blobs == nil {
+			// Generation failed, remove placeholder
+			_ = os.Remove(mergedMeta)
+			_ = os.Remove(vmdkFile)
+		}
+	}()
+
+	// Collect blobs in newest-to-oldest order (same as ParentIDs/overlay lowerdir order).
+	// mkfs.erofs multidev mode expects layers ordered from top (newest) to bottom (oldest).
+	for _, snapID := range snapIDs {
+		blob := s.layerBlobPath(snapID)
 		if _, err := os.Stat(blob); err != nil {
+			blobs = nil // Signal failure
 			return
 		}
 		blobs = append(blobs, blob)
 	}
-	tmpMergedMeta := mergedMeta + ".tmp"
-	vmdkFile := s.vmdkPath(snapIDs[0])
-	tmpVmdkFile := vmdkFile + ".tmp"
 
 	// Use rebuild mode to generate flatdev fsmeta with mapped_blkaddr.
 	// The --vmdk-desc option generates both fsmeta and VMDK descriptor in one step.
-	// This allows QEMU to present all layers as a single concatenated block device.
-	args := append([]string{"--quiet", "--vmdk-desc=" + tmpVmdkFile, tmpMergedMeta}, blobs...)
+	// IMPORTANT: We use final paths (not temp) because mkfs.erofs embeds the fsmeta
+	// path into the VMDK descriptor. Using temp paths would cause QEMU to fail.
+	args := append([]string{"--quiet", "--vmdk-desc=" + vmdkFile, mergedMeta}, blobs...)
 	log.G(ctx).Infof("merging layers with mkfs.erofs %v", args)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.G(ctx).Warnf("failed to generate merged fsmeta for %v: %q: %v", snapIDs[0], string(out), err)
-		return
-	}
-
-	// Atomically replace the fsmeta and VMDK with the generated files
-	if err = os.Rename(tmpMergedMeta, mergedMeta); err != nil {
-		log.G(ctx).Errorf("failed to rename fsmeta: %v", err)
-		return
-	}
-	if err = os.Rename(tmpVmdkFile, vmdkFile); err != nil {
-		log.G(ctx).Errorf("failed to rename vmdk: %v", err)
-		_ = os.Remove(mergedMeta)
+		blobs = nil // Signal failure
 		return
 	}
 
