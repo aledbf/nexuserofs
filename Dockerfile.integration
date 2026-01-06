@@ -7,6 +7,11 @@ ARG NERDCTL_VERSION=2.2.1
 
 FROM golang:${GO_VERSION}
 
+# OCI labels for GitHub Container Registry
+LABEL org.opencontainers.image.source=https://github.com/aledbf/nexuserofs
+LABEL org.opencontainers.image.description="Integration test environment for nexuserofs snapshotter"
+LABEL org.opencontainers.image.licenses=Apache-2.0
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     e2fsprogs \
