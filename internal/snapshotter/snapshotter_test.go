@@ -203,19 +203,6 @@ func TestEnsureMarkerFile(t *testing.T) {
 }
 
 func TestSnapshotterOptions(t *testing.T) {
-	t.Run("WithOvlOptions", func(t *testing.T) {
-		config := &SnapshotterConfig{}
-		opt := WithOvlOptions([]string{"metacopy=on", "redirect_dir=on"})
-		opt(config)
-
-		if len(config.ovlOptions) != 2 {
-			t.Errorf("expected 2 options, got %d", len(config.ovlOptions))
-		}
-		if config.ovlOptions[0] != "metacopy=on" {
-			t.Errorf("expected first option to be 'metacopy=on', got %q", config.ovlOptions[0])
-		}
-	})
-
 	t.Run("WithFsverity", func(t *testing.T) {
 		config := &SnapshotterConfig{}
 		opt := WithFsverity()

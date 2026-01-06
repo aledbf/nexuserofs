@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -212,6 +213,12 @@ func (s *ErofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, 
 // If mounts require the mount manager (formatted mounts, templates, or EROFS),
 // it activates them through the mount manager first.
 func withLowerMount(ctx context.Context, lower []mount.Mount, mm mount.Manager, f func(root string) error) error {
+	// Handle EROFS multi-device mounts directly - the containerd mount manager
+	// cannot handle EROFS with device= options (fsmeta multi-device).
+	if mountutils.HasErofsMultiDevice(lower) {
+		return withErofsTempMount(ctx, lower, f)
+	}
+
 	if mountutils.NeedsMountManager(lower) {
 		if mm == nil {
 			return fmt.Errorf("mount manager is required to resolve formatted mounts: %w", errdefs.ErrNotImplemented)
@@ -254,6 +261,12 @@ func withLowerMount(ctx context.Context, lower []mount.Mount, mm mount.Manager, 
 // If mounts require the mount manager (formatted mounts, templates, or EROFS),
 // it activates them through the mount manager first.
 func withUpperMount(ctx context.Context, upper []mount.Mount, mm mount.Manager, f func(root string) error) error {
+	// Handle EROFS multi-device mounts directly - the containerd mount manager
+	// cannot handle EROFS with device= options (fsmeta multi-device).
+	if mountutils.HasErofsMultiDevice(upper) {
+		return withErofsTempMount(ctx, upper, f)
+	}
+
 	if mountutils.NeedsMountManager(upper) {
 		if mm == nil {
 			return fmt.Errorf("mount manager is required to resolve formatted mounts: %w", errdefs.ErrNotImplemented)
@@ -286,6 +299,29 @@ func withUpperMount(ctx context.Context, upper []mount.Mount, mm mount.Manager, 
 		return mount.WithReadonlyTempMount(ctx, info.System, f)
 	}
 	return mount.WithReadonlyTempMount(ctx, upper, f)
+}
+
+// withErofsTempMount mounts EROFS mounts (including multi-device fsmeta) to a
+// temporary directory and calls f with the mount root. This handles EROFS mounts
+// that the containerd mount manager cannot handle.
+func withErofsTempMount(ctx context.Context, mounts []mount.Mount, f func(root string) error) error {
+	tempDir, err := os.MkdirTemp("", "erofs-diff-")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cleanup, err := mountutils.MountAll(mounts, tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to mount EROFS: %w", err)
+	}
+	defer func() {
+		if cerr := cleanup(); cerr != nil {
+			log.G(ctx).WithError(cerr).Warn("failed to cleanup EROFS mount")
+		}
+	}()
+
+	return f(tempDir)
 }
 
 // lowerOverlayOnly returns true if the mounts represent an overlay with only

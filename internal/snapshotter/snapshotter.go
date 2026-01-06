@@ -42,8 +42,6 @@ import (
 
 // SnapshotterConfig is used to configure the erofs snapshotter instance
 type SnapshotterConfig struct {
-	// ovlOptions are the base options added to the overlayfs mount (defaults to [""])
-	ovlOptions []string
 	// enableFsverity enables fsverity for EROFS layers
 	enableFsverity bool
 	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
@@ -54,13 +52,6 @@ type SnapshotterConfig struct {
 
 // Opt is an option to configure the erofs snapshotter
 type Opt func(config *SnapshotterConfig)
-
-// WithOvlOptions defines the extra mount options for overlayfs
-func WithOvlOptions(options []string) Opt {
-	return func(config *SnapshotterConfig) {
-		config.ovlOptions = options
-	}
-}
 
 // WithFsverity enables fsverity for EROFS layers
 func WithFsverity() Opt {
@@ -87,7 +78,6 @@ func WithDefaultSize(size int64) Opt {
 type snapshotter struct {
 	root            string
 	ms              *storage.MetaStore
-	ovlOptions      []string
 	enableFsverity  bool
 	setImmutable    bool
 	defaultWritable int64
@@ -152,7 +142,6 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	s := &snapshotter{
 		root:            root,
 		ms:              ms,
-		ovlOptions:      config.ovlOptions,
 		enableFsverity:  config.enableFsverity,
 		setImmutable:    config.setImmutable,
 		defaultWritable: config.defaultSize,

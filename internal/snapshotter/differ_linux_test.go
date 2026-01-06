@@ -42,7 +42,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -309,31 +308,6 @@ func (e *differTestEnv) createView(key, parentKey string) []mount.Mount {
 	return mounts
 }
 
-// hasErofsMultiDevice checks if mounts contain EROFS multi-device options (device=).
-// The containerd mount manager cannot mount these - they require VM/vminitd support.
-func hasErofsMultiDevice(mounts []mount.Mount) bool {
-	for _, m := range mounts {
-		if mountutils.TypeSuffix(m.Type) != testTypeErofs {
-			continue
-		}
-		for _, opt := range m.Options {
-			if strings.HasPrefix(opt, "device=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// skipIfErofsMultiDevice skips the test if mounts contain EROFS multi-device options.
-// The containerd mount manager cannot mount fsmeta.erofs with device= options.
-func skipIfErofsMultiDevice(t *testing.T, mounts []mount.Mount) {
-	t.Helper()
-	if hasErofsMultiDevice(mounts) {
-		t.Skip("SKIPPED: EROFS multi-device mounts (fsmeta with device= options) require VM runtime, not host mount manager")
-	}
-}
-
 // compareAndVerify runs Compare and verifies the result contains expected files.
 func (e *differTestEnv) compareAndVerify(differ *erofsdiffer.ErofsDiff, lower, upper []mount.Mount, expectedFiles ...string) ocispec.Descriptor {
 	e.t.Helper()
@@ -548,10 +522,6 @@ func TestErofsDifferCompareWithMountManager(t *testing.T) {
 	upperMounts := env.prepareActiveLayer(testKeyUpper, childCommit, "upper.txt", "upper")
 	lowerMounts := env.createView(testKeyLower, childCommit)
 
-	// Multi-layer view returns fsmeta.erofs with device= options (consolidated)
-	// Skip if containerd mount manager can't handle fsmeta multi-device
-	skipIfErofsMultiDevice(t, lowerMounts)
-
 	// Verify we have EROFS mount(s)
 	hasErofs := false
 	for _, m := range lowerMounts {
@@ -700,10 +670,6 @@ func TestErofsDifferCompareMultipleStackedLayers(t *testing.T) {
 	upperMounts := env.prepareActiveLayer(testKeyUpper, parentKey, "upper.txt", "upper")
 	lowerMounts := env.createView(testKeyLower, parentKey)
 
-	// Multi-layer view returns fsmeta.erofs with device= options (consolidated)
-	// Skip if containerd mount manager can't handle fsmeta multi-device
-	skipIfErofsMultiDevice(t, lowerMounts)
-
 	// Should have at least one EROFS mount
 	hasErofs := false
 	for _, m := range lowerMounts {
@@ -800,10 +766,6 @@ func TestErofsDifferCompareViewWithMultipleLayers(t *testing.T) {
 
 	// Create a view of the two layers
 	viewMounts := env.createView("view", layer2Commit)
-
-	// Multi-layer view returns fsmeta.erofs with device= options (consolidated)
-	// Skip if containerd mount manager can't handle fsmeta multi-device
-	skipIfErofsMultiDevice(t, viewMounts)
 	t.Logf("view mounts: %#v", viewMounts)
 
 	// Create upper layer
@@ -826,10 +788,6 @@ func TestErofsDifferCompareDoesNotRequireMountManager(t *testing.T) {
 	// Get mounts
 	upperMounts := env.prepareActiveLayer(testKeyUpper, childCommit, "upper.txt", "upper")
 	lowerMounts := env.createView(testKeyLower, childCommit)
-
-	// Multi-layer view returns fsmeta.erofs with device= options (consolidated)
-	// Skip if containerd mount manager can't handle fsmeta multi-device
-	skipIfErofsMultiDevice(t, lowerMounts)
 
 	// Should have at least one EROFS mount
 	hasErofs := false
