@@ -1,0 +1,59 @@
+# Dockerfile for integration tests with containerd and nexuserofs snapshotter
+# Build: docker build -t nexuserofs-integration -f Dockerfile.integration .
+# Run:   docker run --privileged --rm -v $(pwd):/workspace nexuserofs-integration
+
+ARG GO_VERSION=1.25
+ARG NERDCTL_VERSION=2.2.1
+
+FROM golang:${GO_VERSION}
+
+# OCI labels for GitHub Container Registry
+LABEL org.opencontainers.image.source=https://github.com/aledbf/nexuserofs
+LABEL org.opencontainers.image.description="Integration test environment for nexuserofs snapshotter"
+LABEL org.opencontainers.image.licenses=Apache-2.0
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    e2fsprogs \
+    kmod \
+    ca-certificates \
+    iptables \
+    runc \
+    fuse3 \
+    procps \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and run the erofs-utils build script
+COPY scripts/build-erofs-utils.sh /tmp/build-erofs-utils.sh
+RUN /tmp/build-erofs-utils.sh /usr/local && rm /tmp/build-erofs-utils.sh
+
+# Verify erofs-utils installation
+RUN mkfs.erofs --version
+
+# Install nerdctl
+ARG NERDCTL_VERSION
+RUN curl -sSL "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VERSION}/nerdctl-full-${NERDCTL_VERSION}-linux-amd64.tar.gz" | \
+    tar -xz -C /usr/local
+
+# Create loop devices (up to loop31 for integration tests)
+RUN for i in $(seq 0 31); do \
+        [ -e /dev/loop$i ] || mknod -m 0660 /dev/loop$i b 7 $i; \
+    done
+
+# Create required directories
+RUN mkdir -p \
+    /var/lib/containerd-test \
+    /var/lib/nexuserofs-snapshotter \
+    /run/containerd \
+    /run/nexuserofs-snapshotter \
+    /tmp/integration-logs
+
+WORKDIR /workspace
+
+# Copy integration test script
+COPY scripts/integration-test.sh /usr/local/bin/integration-test.sh
+RUN chmod +x /usr/local/bin/integration-test.sh
+
+# Default entrypoint runs integration tests
+ENTRYPOINT ["/usr/local/bin/integration-test.sh"]

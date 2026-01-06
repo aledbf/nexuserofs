@@ -85,3 +85,18 @@ tasks:
     desc: Clean build artifacts
     cmds:
       - rm -rf {{.BIN_DIR}}
+
+  integration-test:
+    desc: Run integration tests with containerd in Docker
+    cmds:
+      - ./scripts/run-integration-tests.sh
+
+  integration-test-build:
+    desc: Build integration test image and run tests
+    cmds:
+      - ./scripts/run-integration-tests.sh --build
+
+  integration-shell:
+    desc: Start interactive shell in integration test container
+    cmds:
+      - ./scripts/run-integration-tests.sh --shell

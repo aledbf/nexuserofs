@@ -352,6 +352,120 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	})
 }
 
+// TestErofsCommitWithoutHostMount tests commit when the /rw directory doesn't exist.
+// This simulates the VM-only scenario where the VM mounts the ext4 (not the host).
+// The commit code must handle the case where rwMount path doesn't exist when
+// checking mountinfo.Mounted().
+func TestErofsCommitWithoutHostMount(t *testing.T) {
+	testutil.RequiresRoot(t)
+	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
+
+	if err := preflight.CheckErofsSupport(); err != nil {
+		t.Skipf("EROFS support check failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	snapshotRoot := filepath.Join(tempDir, "snapshots")
+	s, err := NewSnapshotter(snapshotRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer cleanupAllSnapshots(ctx, s)
+	t.Cleanup(func() {
+		mount.UnmountRecursive(snapshotRoot, 0)
+	})
+
+	snap, ok := s.(*snapshotter)
+	if !ok {
+		t.Fatal("failed to cast snapshotter to *snapshotter")
+	}
+
+	// First, create a base layer using extract key (so we have a parent to prepare from)
+	baseKey := "extract-base"
+	if _, err := s.Prepare(ctx, baseKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	baseID := snapshotID(ctx, t, snap, baseKey)
+
+	// Write some files to the base layer
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit the base layer
+	baseCommit := "base-commit"
+	if err := s.Commit(ctx, baseCommit, baseKey); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now prepare a VM-only snapshot (without extract- prefix)
+	// This will create rwlayer.img but NOT mount it on the host
+	vmKey := "vm-only-active"
+	if _, err := s.Prepare(ctx, vmKey, baseCommit); err != nil {
+		t.Fatal(err)
+	}
+	vmID := snapshotID(ctx, t, snap, vmKey)
+
+	// Verify the rwlayer.img exists but /rw directory does NOT
+	rwLayerPath := snap.writablePath(vmID)
+	if _, err := os.Stat(rwLayerPath); err != nil {
+		t.Fatalf("rwlayer.img should exist: %v", err)
+	}
+	rwMountPath := snap.blockRwMountPath(vmID)
+	if _, err := os.Stat(rwMountPath); !os.IsNotExist(err) {
+		t.Fatalf("/rw directory should NOT exist for VM-only snapshot, but got: %v", err)
+	}
+
+	// Simulate VM operation: manually mount the ext4, write files, unmount
+	if err := os.MkdirAll(rwMountPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	m := mount.Mount{
+		Source:  rwLayerPath,
+		Type:    "ext4",
+		Options: []string{"rw", "loop"},
+	}
+	if err := m.Mount(rwMountPath); err != nil {
+		t.Fatalf("mount ext4 for test: %v", err)
+	}
+
+	// Create upper dir and write a file
+	upperPath := snap.blockUpperPath(vmID)
+	if err := os.MkdirAll(upperPath, 0755); err != nil {
+		mount.UnmountAll(rwMountPath, 0)
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upperPath, "vm-file.txt"), []byte("vm-data"), 0644); err != nil {
+		mount.UnmountAll(rwMountPath, 0)
+		t.Fatal(err)
+	}
+
+	// Unmount to simulate VM finishing its work
+	if err := mount.UnmountAll(rwMountPath, 0); err != nil {
+		t.Fatalf("unmount ext4: %v", err)
+	}
+
+	// Remove the /rw directory to simulate the state after VM unmount
+	if err := os.Remove(rwMountPath); err != nil {
+		t.Fatalf("remove /rw directory: %v", err)
+	}
+
+	// Now commit - this is where the bug was: mountinfo.Mounted() failed on non-existent path
+	vmCommit := "vm-only-commit"
+	if err := s.Commit(ctx, vmCommit, vmKey); err != nil {
+		t.Fatalf("commit should succeed even when /rw doesn't exist: %v", err)
+	}
+
+	// Verify the layer blob was created
+	layerBlob := snap.layerBlobPath(vmID)
+	if _, err := os.Stat(layerBlob); err != nil {
+		t.Fatalf("layer blob should exist after commit: %v", err)
+	}
+
+	t.Logf("Successfully committed VM-only snapshot without pre-existing /rw directory")
+}
+
 // TestErofsSnapshotterFsmetaSingleLayerView tests that when fsmeta merge
 // collapses multiple layers into a single mount, KindView returns the EROFS
 // mount directly without requiring mount manager resolution.
