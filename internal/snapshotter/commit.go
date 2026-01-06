@@ -39,9 +39,13 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 	rwMount := s.blockRwMountPath(id)
 
 	// Check if already mounted (from Prepare/Mounts) before trying to mount again.
-	alreadyMounted, err := mountinfo.Mounted(rwMount)
-	if err != nil {
-		return fmt.Errorf("check mount status: %w", err)
+	// For VM-only snapshots, the /rw directory may not exist (VM mounts ext4, not host).
+	alreadyMounted := false
+	if _, err := os.Stat(rwMount); err == nil {
+		alreadyMounted, err = mountinfo.Mounted(rwMount)
+		if err != nil {
+			return fmt.Errorf("check mount status: %w", err)
+		}
 	}
 	if !alreadyMounted {
 		// Mount read-only for commit (we're just reading the upper contents)
