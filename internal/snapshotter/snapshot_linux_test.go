@@ -565,11 +565,16 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 		}
 
 		// Verify we have EROFS mounts (possibly with device= for multi-device)
+		// Multi-device fsmeta mounts return "format/erofs", single-layer returns "erofs"
 		hasErofs := false
 		for _, m := range viewMounts {
-			if m.Type == testTypeErofs {
+			if mountutils.TypeSuffix(m.Type) == testTypeErofs {
 				hasErofs = true
-				t.Logf("found EROFS mount: source=%s, options=%v", m.Source, m.Options)
+				t.Logf("found EROFS mount: type=%s, source=%s, options=%v", m.Type, m.Source, m.Options)
+				// Verify fsmeta mounts use format/erofs
+				if strings.HasSuffix(m.Source, "fsmeta.erofs") && m.Type != "format/erofs" {
+					t.Fatalf("fsmeta mount should use format/erofs type, got: %s", m.Type)
+				}
 			}
 		}
 		if !hasErofs {

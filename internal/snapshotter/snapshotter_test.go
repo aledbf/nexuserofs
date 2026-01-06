@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/core/snapshots/storage"
 
 	// Import testutil to register the -test.root flag
 	_ "github.com/aledbf/nexus-erofs/internal/testutil"
@@ -233,6 +234,65 @@ func TestSnapshotterOptions(t *testing.T) {
 		}
 	})
 
+}
+
+func TestMountFsMetaReturnsFormatErofs(t *testing.T) {
+	// This test verifies that mountFsMeta returns "format/erofs" type for multi-device mounts.
+	// The format/ prefix signals that containerd's standard mount manager cannot handle this type,
+	// providing a clear "unsupported mount type" error instead of cryptic EINVAL.
+
+	root := t.TempDir()
+	s := &snapshotter{root: root}
+
+	// Create fake snapshot directories with fsmeta and vmdk files
+	snapshotDir := filepath.Join(root, "snapshots", "parent1")
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create required files for mountFsMeta to succeed
+	vmdkPath := filepath.Join(snapshotDir, "merged.vmdk")
+	fsmetaPath := filepath.Join(snapshotDir, "fsmeta.erofs")
+	layerPath := filepath.Join(snapshotDir, "layer.erofs")
+
+	for _, path := range []string{vmdkPath, fsmetaPath, layerPath} {
+		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a fake storage.Snapshot with ParentIDs
+	snap := storage.Snapshot{
+		ID:        "child",
+		ParentIDs: []string{"parent1"},
+	}
+
+	mount, ok := s.mountFsMeta(snap)
+	if !ok {
+		t.Fatal("mountFsMeta should return true when fsmeta/vmdk exist")
+	}
+
+	// Verify mount type is "format/erofs" (not "erofs")
+	if mount.Type != "format/erofs" {
+		t.Errorf("mountFsMeta returned Type=%q, want %q", mount.Type, "format/erofs")
+	}
+
+	// Verify source points to fsmeta.erofs
+	if mount.Source != fsmetaPath {
+		t.Errorf("mountFsMeta returned Source=%q, want %q", mount.Source, fsmetaPath)
+	}
+
+	// Verify options include device= for parent layer
+	hasDevice := false
+	for _, opt := range mount.Options {
+		if opt == "device="+layerPath {
+			hasDevice = true
+			break
+		}
+	}
+	if !hasDevice {
+		t.Errorf("mountFsMeta should include device= option for parent layer, got: %v", mount.Options)
+	}
 }
 
 func TestSnapshotterPaths(t *testing.T) {
