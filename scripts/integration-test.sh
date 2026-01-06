@@ -373,6 +373,10 @@ root = "${CONTAINERD_ROOT}"
     type = "diff"
     address = "${SNAPSHOTTER_SOCKET}"
 
+# Use nexus-erofs-diff for layer application, with walking as fallback
+[plugins."io.containerd.service.v1.diff-service"]
+  default = ["nexus-erofs-diff", "walking"]
+
 # Configure unpack platforms for the proxy snapshotter
 [plugins."io.containerd.transfer.v1.local"]
   [[plugins."io.containerd.transfer.v1.local".unpack_config]]

@@ -1,46 +1,105 @@
 # Nexus EROFS
 
-External snapshotter plugin for containerd designed exclusively for **VM-based container runtimes** (like [qemubox](https://github.com/aledbf/qemubox)). It stores container image layers as EROFS blobs and returns raw file paths for virtio-blk passthrough to VMs.
+A containerd snapshotter that converts OCI image layers to EROFS and returns raw file paths for VM-based container runtimes.
 
-## Overview
+## Why nexus-erofs?
 
-Unlike traditional snapshotters that mount filesystems on the host, nexus-erofs returns **raw file paths** that VM runtimes pass directly to guest VMs as block devices. The guest kernel handles all mounting internally.
+**The problem:** Traditional snapshotters mount filesystems on the host, then bind-mount them into containers. This doesn't work for VM-based runtimes where containers run inside guest VMs with their own kernels.
+
+**The solution:** nexus-erofs returns *file paths* instead of *mounted directories*. VM runtimes pass these files directly to QEMU as virtio-blk devices. The guest kernel mounts them internally.
+
+| Feature | What it means |
+|---------|---------------|
+| **On-the-fly conversion** | Standard OCI tar layers → EROFS during `pull` |
+| **Single device for multi-layer** | VMDK descriptor concatenates all layers into one block device |
+| **No host mounts for containers** | Guest VM handles all filesystem operations |
+| **Works with standard images** | No pre-conversion needed, pulls from any registry |
+
+## This is NOT
+
+- **A general-purpose snapshotter** - Only for VM runtimes that support the VMDK format
+- **A replacement for overlayfs snapshotter** - Use that for runc/crun containers
+- **containerd's built-in EROFS snapshotter** - That one mounts on host; this one doesn't
+
+## How It Differs
 
 ```
-Traditional Snapshotter:
-  Host mounts overlay → Container sees mounted filesystem
+┌─────────────────────────────────────────────────────────────────────┐
+│ Traditional Snapshotter (overlayfs, native EROFS)                   │
+├─────────────────────────────────────────────────────────────────────┤
+│  Host kernel mounts layers → Container sees mounted filesystem      │
+│  Returns: /var/lib/containerd/snapshots/123/fs (mounted directory)  │
+└─────────────────────────────────────────────────────────────────────┘
 
-nexus-erofs (VM-only):
-  Host returns file paths → VM runtime passes as virtio-blk → Guest mounts internally
+┌─────────────────────────────────────────────────────────────────────┐
+│ nexus-erofs (VM-only)                                               │
+├─────────────────────────────────────────────────────────────────────┤
+│  Host returns file paths → VM passes as virtio-blk → Guest mounts   │
+│  Returns: /var/lib/nexus-erofs/snapshots/123/merged.vmdk (file)     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
+
+### vs containerd's Built-in EROFS Snapshotter
+
+| Aspect | containerd EROFS | nexus-erofs |
+|--------|------------------|-------------|
+| Target runtime | runc, crun (host containers) | qemubox (VM containers) |
+| Layer source | Requires pre-converted EROFS | Converts tar→EROFS on pull |
+| Multi-layer | Host overlayfs stacking | VMDK descriptor (single block device) |
+| Returns | Mounted paths | Raw file paths |
+
+## Quick Start
+
+```bash
+# 1. Start the snapshotter
+sudo nexus-erofs-snapshotter \
+  --root /var/lib/nexus-erofs-snapshotter \
+  --address /run/nexus-erofs-snapshotter/snapshotter.sock \
+  --containerd-address /run/containerd/containerd.sock
+
+# 2. Pull an image using the snapshotter
+ctr images pull --snapshotter nexus-erofs docker.io/library/alpine:latest
+
+# 3. The snapshotter returns file paths (not mounted directories)
+ctr snapshots --snapshotter nexus-erofs mounts /tmp/mnt alpine-snapshot
+# Output: mount -t erofs /var/lib/nexus-erofs-snapshotter/snapshots/1/layer.erofs /tmp/mnt
+```
+
+See [Configuration](#configuration) for containerd integration.
 
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph containerd["containerd"]
-        CS[Content Store]
-        IMG[Images]
-        PP[Proxy Plugins]
+flowchart LR
+    subgraph containerd
+        Pull[Image Pull]
     end
 
-    subgraph snapshotter["nexus-erofs-snapshotter"]
-        DIFFER[EROFS Differ<br/>tar→EROFS]
-        SERVER[Snapshots Server<br/>• Returns VMDK/EROFS file paths<br/>• No host mounting for containers]
+    subgraph nexus["nexus-erofs"]
+        Differ[tar → EROFS]
+        Snap[Return file paths]
     end
 
-    subgraph vmruntime["VM Runtime (qemubox)"]
-        RECV["Receives: {Type:'erofs', Source:'/path/to/merged.vmdk'}<br/>Passes to QEMU as: -drive file=merged.vmdk,format=vmdk"]
+    subgraph vm["VM Runtime"]
+        QEMU[virtio-blk]
     end
 
     subgraph guest["Guest VM"]
-        MOUNT["/dev/vda (VMDK) → mount -t erofs /dev/vda /rootfs<br/>/dev/vdb (ext4) → mount -t ext4 /dev/vdb /upper<br/>overlay mount combines them for container rootfs"]
+        Mount[mount -t erofs]
     end
 
-    PP -->|gRPC| SERVER
-    snapshotter --> vmruntime
-    vmruntime --> guest
+    Pull -->|gRPC| Differ
+    Differ --> Snap
+    Snap -->|"merged.vmdk"| QEMU
+    QEMU -->|/dev/vda| Mount
 ```
+
+**Data flow:**
+1. containerd pulls image, calls nexus-erofs differ
+2. Differ converts each tar layer to EROFS (`mkfs.erofs --tar=f`)
+3. For multi-layer: generates `fsmeta.erofs` + `merged.vmdk`
+4. VM runtime receives file paths, passes to QEMU as block devices
+5. Guest kernel mounts EROFS, creates overlay with ext4 upper
 
 ## How It Works
 
@@ -196,42 +255,6 @@ stateDiagram-v2
         └── merged.vmdk      # VMDK descriptor for QEMU (requires --vmdk-desc)
 ```
 
-## Code Structure
-
-```
-internal/
-├── cleanup/       # Context cleanup utilities for graceful shutdown
-├── differ/        # EROFS differ (tar→EROFS conversion, layer comparison)
-├── erofs/         # EROFS conversion utilities (mkfs.erofs wrapper)
-├── fsverity/      # fs-verity support for layer integrity
-├── loop/          # Loop device management
-├── mountutils/    # Mount utilities and helpers
-├── preflight/     # System compatibility checks
-├── snapshotter/   # Main snapshotter implementation
-│   ├── snapshotter.go   # Core struct, config, lifecycle (~200 lines)
-│   ├── paths.go         # Path helpers and constants (~100 lines)
-│   ├── mounts.go        # Mount logic (view, active, diff) (~260 lines)
-│   ├── commit.go        # Commit and EROFS conversion (~220 lines)
-│   └── operations.go    # CRUD operations (~310 lines)
-├── store/         # Namespace-aware content store wrapper
-├── stringutil/    # String utilities
-└── testutil/      # Testing utilities
-
-cmd/
-└── nexus-erofs-snapshotter/  # Main entry point
-```
-
-### Key Packages
-
-| Package | Purpose |
-|---------|---------|
-| `snapshotter` | Core containerd snapshotter interface implementation |
-| `differ` | Implements containerd differ interface for tar→EROFS conversion |
-| `erofs` | Low-level EROFS operations (mkfs.erofs wrapper, block size detection) |
-| `loop` | Linux loop device setup/teardown with serial number tracking |
-| `mountutils` | Mount helpers, template resolution, unique reference generation |
-| `preflight` | System compatibility checks (kernel version, EROFS support) |
-
 ## Requirements
 
 ### Runtime
@@ -293,10 +316,13 @@ sudo ./bin/nexus-erofs-snapshotter \
 
 ### containerd
 
+Add these sections to your containerd config:
+
 ```toml
 # /etc/containerd/config.toml
 version = 2
 
+# Register the external snapshotter and differ
 [proxy_plugins]
   [proxy_plugins.nexus-erofs]
     type = "snapshot"
@@ -305,7 +331,32 @@ version = 2
   [proxy_plugins.nexus-erofs-diff]
     type = "diff"
     address = "/run/nexus-erofs-snapshotter/snapshotter.sock"
+
+[plugins]
+  # Configure diff service to use nexus-erofs-diff (with walking as fallback)
+  [plugins."io.containerd.service.v1.diff-service"]
+    default = ["nexus-erofs-diff", "walking"]
+
+  # Configure layer unpacking to use nexus-erofs
+  [plugins."io.containerd.transfer.v1.local"]
+    [[plugins."io.containerd.transfer.v1.local".unpack_config]]
+      platform = "linux/amd64"
+      snapshotter = "nexus-erofs"
+      differ = "nexus-erofs-diff"
+
+  # For CRI (Kubernetes): use nexus-erofs for image pulls
+  [plugins."io.containerd.cri.v1.images"]
+    snapshotter = "nexus-erofs"
 ```
+
+**Key configuration sections:**
+
+| Section | Purpose |
+|---------|---------|
+| `proxy_plugins` | Registers the external snapshotter and differ services |
+| `diff-service.default` | Prioritizes nexus-erofs-diff for layer application |
+| `transfer.v1.local.unpack_config` | Tells containerd which snapshotter/differ to use for unpacking |
+| `cri.v1.images.snapshotter` | (Optional) Makes CRI use nexus-erofs for Kubernetes workloads |
 
 ### Snapshotter Flags
 
@@ -325,37 +376,6 @@ version = 2
 ### Layer Conversion and fsmeta
 
 Layers are created using full conversion mode (`--tar=f`), which converts tar archives to EROFS format with 4096-byte blocks. This ensures compatibility with fsmeta merge, allowing multi-layer images to be consolidated into a single mount with a VMDK descriptor for efficient VM handling.
-
-## Key Differences from Traditional Snapshotters
-
-| Aspect | Traditional | nexus-erofs (VM-only) |
-|--------|-------------|----------------------|
-| Mount location | Host kernel | Guest VM kernel |
-| Returns | Mounted paths | Raw file paths |
-| Overlay handling | Host overlayfs | Guest overlayfs |
-| Layer format | Directory trees | EROFS blobs + VMDK |
-| Use case | runc, crun | qemubox, Firecracker |
-
-## Differences vs containerd's Built-in EROFS Snapshotter
-
-containerd 2.0+ includes a built-in EROFS snapshotter. nexus-erofs differs in several key ways:
-
-| Aspect | containerd EROFS | nexus-erofs |
-|--------|------------------|------------|
-| **Plugin type** | Built-in | External proxy plugin |
-| **Target runtime** | Host containers (runc) | VM containers (qemubox) |
-| **Layer conversion** | Requires pre-converted EROFS layers | Converts tar→EROFS on pull via differ |
-| **Multi-layer handling** | Host overlayfs stacking | fsmeta + VMDK for single virtio-blk device |
-| **Mount returns** | Mounted overlayfs paths | Raw file paths (no host mounting) |
-| **Tar mode** | N/A | `--tar=f` (full) or `--tar=i` (index) |
-| **VMDK generation** | No | Yes (always for multi-layer) |
-
-### Why Use nexus-erofs?
-
-1. **VM-native design**: Returns file paths that map directly to virtio-blk devices
-2. **On-the-fly conversion**: Converts standard OCI tar layers to EROFS during pull
-3. **Single device for multi-layer**: VMDK descriptor lets QEMU present all layers as one block device
-4. **No host overlayfs**: Guest VM handles all filesystem stacking internally
 
 ## License
 
