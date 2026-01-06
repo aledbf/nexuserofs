@@ -848,12 +848,36 @@ test_multi_layer() {
         return 1
     fi
 
+    # Find the top-level committed snapshot from the multi-layer image
+    # This is the one with the most parent layers
+    local top_snap
+    top_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls | grep -v "^KEY" | grep "Committed" | tail -1 | awk '{print $1}')
+
+    if [ -z "$top_snap" ]; then
+        log_error "Could not find top-level committed snapshot"
+        return 1
+    fi
+    log_info "Top-level snapshot: $top_snap"
+
+    # Create a view mount to trigger VMDK generation
+    # VMDK is only generated when View() is called, not just when pulling
+    local view_name="test-multi-view-${TEST_NAMESPACE}"
+    log_info "Creating view to trigger VMDK generation..."
+    if ! ctr_cmd snapshots --snapshotter nexus-erofs view "$view_name" "$top_snap" >/dev/null 2>&1; then
+        log_error "Failed to create view snapshot"
+        return 1
+    fi
+
+    # Small delay to ensure files are written
+    sleep 0.5
+
     # Verify VMDK generation (required for multi-layer images)
     local vmdk_count
     vmdk_count=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "merged.vmdk" 2>/dev/null | wc -l)
 
     if [ "$vmdk_count" -eq 0 ]; then
         log_error "No VMDK descriptors found for multi-layer image"
+        ctr_cmd snapshots --snapshotter nexus-erofs rm "$view_name" 2>/dev/null || true
         return 1
     fi
     log_info "VMDK descriptors generated: $vmdk_count"
@@ -864,9 +888,12 @@ test_multi_layer() {
 
     if [ "$fsmeta_count" -eq 0 ]; then
         log_error "No fsmeta.erofs found for multi-layer image"
+        ctr_cmd snapshots --snapshotter nexus-erofs rm "$view_name" 2>/dev/null || true
         return 1
     fi
     log_info "Fsmeta files generated: $fsmeta_count"
+
+    # Don't clean up - leave view for test_vmdk_layer_order to verify
 }
 
 # Test: Verify EROFS layer files are created correctly
