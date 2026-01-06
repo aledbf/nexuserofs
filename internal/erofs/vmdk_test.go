@@ -2,6 +2,7 @@ package erofsutils
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,5 +176,84 @@ func TestVmdkDescAddExtent_LargeDevice(t *testing.T) {
 	// Second extent should be remaining sectors
 	if !strings.Contains(lines[1], "RW 2097152 FLAT") {
 		t.Errorf("second extent should be 2097152 sectors, got: %s", lines[1])
+	}
+}
+
+func TestWriteVMDKDescriptor_LayerOrderPreserved(t *testing.T) {
+	// This test verifies that the order of layers in the VMDK descriptor
+	// matches the order they were passed in. This is critical for container
+	// images where layer order determines the filesystem overlay semantics.
+	tmpDir := t.TempDir()
+
+	// Create test device files with different sizes to make them distinguishable
+	layers := []struct {
+		name string
+		size int
+	}{
+		{"base_layer.erofs", 1 * 1024 * 1024},   // 1MB - base layer
+		{"layer2.erofs", 2 * 1024 * 1024},       // 2MB
+		{"layer3.erofs", 3 * 1024 * 1024},       // 3MB
+		{"top_layer.erofs", 4 * 1024 * 1024},    // 4MB - topmost layer
+	}
+
+	devices := make([]string, len(layers))
+	for i, layer := range layers {
+		path := filepath.Join(tmpDir, layer.name)
+		if err := os.WriteFile(path, make([]byte, layer.size), 0644); err != nil {
+			t.Fatalf("failed to create %s: %v", layer.name, err)
+		}
+		devices[i] = path
+	}
+
+	var buf bytes.Buffer
+	if err := WriteVMDKDescriptor(&buf, devices); err != nil {
+		t.Fatalf("WriteVMDKDescriptor failed: %v", err)
+	}
+
+	result := buf.String()
+
+	// Extract all extent lines and verify order
+	var extentLines []string
+	for _, line := range strings.Split(result, "\n") {
+		if strings.HasPrefix(line, "RW ") && strings.Contains(line, "FLAT") {
+			extentLines = append(extentLines, line)
+		}
+	}
+
+	if len(extentLines) != len(layers) {
+		t.Fatalf("expected %d extent lines, got %d", len(layers), len(extentLines))
+	}
+
+	// Verify each layer appears in the correct position
+	for i, layer := range layers {
+		expectedPath := filepath.Join(tmpDir, layer.name)
+		if !strings.Contains(extentLines[i], expectedPath) {
+			t.Errorf("extent line %d should reference %s, but got: %s", i, layer.name, extentLines[i])
+		}
+
+		// Also verify the sector count matches the expected size
+		expectedSectors := layer.size / 512
+		expectedPrefix := fmt.Sprintf("RW %d FLAT", expectedSectors)
+		if !strings.HasPrefix(extentLines[i], expectedPrefix) {
+			t.Errorf("extent line %d should start with %q, got: %s", i, expectedPrefix, extentLines[i])
+		}
+	}
+
+	// Additional check: verify the relative positions using string indices
+	// This ensures layer order is preserved even if the test above passes coincidentally
+	prevIndex := -1
+	for i, layer := range layers {
+		path := filepath.Join(tmpDir, layer.name)
+		currentIndex := strings.Index(result, path)
+		if currentIndex == -1 {
+			t.Errorf("layer %s not found in VMDK descriptor", layer.name)
+			continue
+		}
+		if currentIndex <= prevIndex {
+			t.Errorf("layer %s (index %d) should appear after previous layer (index %d) - order not preserved",
+				layer.name, currentIndex, prevIndex)
+		}
+		prevIndex = currentIndex
+		t.Logf("layer %d (%s) found at index %d", i, layer.name, currentIndex)
 	}
 }
