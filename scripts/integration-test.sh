@@ -949,61 +949,28 @@ test_vmdk_layer_order() {
         log_info "  [$i] sha256:${vmdk_digests[$i]:0:12}..."
     done
 
-    # Get manifest from registry using crane or ctr
-    # The manifest contains layers in bottom-to-top order (oldest first)
+    # Get layer digests from the pulled image using nerdctl
+    # The RootFS.DiffIDs are in bottom-to-top order (oldest first)
     local manifest_digests=()
 
-    # Try to get manifest using ctr content fetch
-    local manifest_json
-    manifest_json=$(ctr_cmd images check 2>&1 | grep -E "manifest|config" || true)
-    log_debug "Image check output: $manifest_json"
+    log_info "Fetching layer info from pulled image..."
+    local image_inspect
+    image_inspect=$(nerdctl image inspect "${MULTI_LAYER_IMAGE}" 2>/dev/null || echo "")
 
-    # Use crane if available (more reliable for manifest parsing)
-    if command -v crane &>/dev/null; then
-        log_info "Using crane to fetch manifest"
-        local manifest
-        manifest=$(crane manifest "${MULTI_LAYER_IMAGE}" 2>/dev/null || echo "")
-        if [ -n "$manifest" ]; then
-            # Extract layer digests from manifest (in bottom-to-top order)
-            while IFS= read -r digest; do
-                # Extract just the hash part from sha256:xxx
-                if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
-                    manifest_digests+=("${BASH_REMATCH[1]}")
-                fi
-            done < <(echo "$manifest" | grep -oE '"sha256:[a-f0-9]+"' | tr -d '"' | grep -v "config")
-
-            log_info "Found ${#manifest_digests[@]} layers in manifest (bottom-to-top order):"
-            for i in "${!manifest_digests[@]}"; do
-                log_info "  [$i] sha256:${manifest_digests[$i]:0:12}..."
-            done
-        fi
-    else
-        log_warn "crane not available, using fallback method"
-        # Fallback: use curl to fetch manifest directly
-        # Extract registry, repo, and tag from image reference
-        local registry repo tag
-        if [[ "${MULTI_LAYER_IMAGE}" =~ ^([^/]+)/(.+):(.+)$ ]]; then
-            registry="${BASH_REMATCH[1]}"
-            repo="${BASH_REMATCH[2]}"
-            tag="${BASH_REMATCH[3]}"
-
-            log_debug "Fetching manifest from $registry for $repo:$tag"
-
-            # Fetch manifest (handle ghcr.io and other registries)
-            local manifest_url="https://${registry}/v2/${repo}/manifests/${tag}"
-            local manifest
-            manifest=$(curl -sL -H "Accept: application/vnd.oci.image.manifest.v1+json" \
-                            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-                            "$manifest_url" 2>/dev/null || echo "")
-
-            if [ -n "$manifest" ]; then
-                while IFS= read -r digest; do
-                    if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
-                        manifest_digests+=("${BASH_REMATCH[1]}")
-                    fi
-                done < <(echo "$manifest" | grep -oE '"sha256:[a-f0-9]+"' | tr -d '"')
+    if [ -n "$image_inspect" ]; then
+        # Extract DiffIDs from RootFS section (these are the layer digests in order)
+        while IFS= read -r digest; do
+            if [[ "$digest" =~ sha256:([a-f0-9]+) ]]; then
+                manifest_digests+=("${BASH_REMATCH[1]}")
             fi
-        fi
+        done < <(echo "$image_inspect" | grep -oE '"sha256:[a-f0-9]+"' | tr -d '"' | uniq)
+
+        log_info "Found ${#manifest_digests[@]} layers in image (bottom-to-top order):"
+        for i in "${!manifest_digests[@]}"; do
+            log_info "  [$i] sha256:${manifest_digests[$i]:0:12}..."
+        done
+    else
+        log_warn "Could not inspect image, skipping layer order comparison"
     fi
 
     # Compare orders if we got manifest digests
