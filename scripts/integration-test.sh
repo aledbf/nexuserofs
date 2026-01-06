@@ -11,6 +11,7 @@
 #   --rebuild       Rebuild binaries from source (default: use pre-built)
 #   --verbose, -v   Enable verbose output
 #   --junit FILE    Generate JUnit XML report (default: /tmp/integration-logs/junit.xml)
+#   --strict        Fail tests that cannot fully verify their assertions
 #   -h, --help      Show this help message
 
 set -euo pipefail
@@ -35,6 +36,7 @@ MULTI_LAYER_IMAGE="${MULTI_LAYER_IMAGE:-docker.io/library/nginx:1.27-alpine}"
 CLEANUP_ON_EXIT="${CLEANUP_ON_EXIT:-true}"
 REBUILD_BINARIES="${REBUILD_BINARIES:-false}"
 VERBOSE="${VERBOSE:-true}"
+STRICT_MODE="${STRICT_MODE:-true}"
 SINGLE_TEST=""
 JUNIT_OUTPUT=""
 
@@ -50,7 +52,11 @@ NC='\033[0m'
 # Test tracking
 declare -A TEST_TIMES
 declare -A TEST_RESULTS
+declare -A TEST_MESSAGES
 TOTAL_START_TIME=0
+
+# Cross-test state (for tests that depend on each other)
+MULTI_LAYER_VIEW_NAME=""
 
 # =============================================================================
 # Logging Functions
@@ -258,12 +264,16 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --strict)
+            STRICT_MODE=true
+            shift
+            ;;
         --junit)
             JUNIT_OUTPUT="${2:-${LOG_DIR}/junit.xml}"
             shift 2
             ;;
         -h|--help)
-            head -16 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+            head -18 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
         *)
@@ -588,6 +598,42 @@ cleanup_nerdctl_container() {
     nerdctl --snapshotter nexus-erofs rm -f "$name" 2>/dev/null || true
 }
 
+# Helper: get snapshot parent using containerd API
+get_snapshot_parent() {
+    local snap_name="$1"
+    local snap_info
+    snap_info=$(ctr_cmd snapshots --snapshotter nexus-erofs info "$snap_name" 2>/dev/null) || return 1
+
+    # Extract parent from snapshot info (format: Parent: "parent-name" or Parent: parent-name)
+    local parent
+    parent=$(echo "$snap_info" | grep -E "^\s*Parent:" | sed 's/.*Parent:[[:space:]]*//' | tr -d '"' | xargs)
+
+    # Return empty string for root snapshots
+    if [ "$parent" = "" ] || [ "$parent" = '""' ] || [ "$parent" = "null" ]; then
+        echo ""
+    else
+        echo "$parent"
+    fi
+}
+
+# Helper: get snapshot labels
+get_snapshot_labels() {
+    local snap_name="$1"
+    ctr_cmd snapshots --snapshotter nexus-erofs info "$snap_name" 2>/dev/null | grep -A100 "Labels:" | grep -E "^\s+-" || true
+}
+
+# Helper: extract layer digest from snapshot labels
+get_snapshot_layer_digest() {
+    local snap_name="$1"
+    local labels
+    labels=$(get_snapshot_labels "$snap_name")
+
+    # Look for containerd.io/snapshot/cri.layer-digest or similar label
+    local digest
+    digest=$(echo "$labels" | grep -oE 'sha256:[a-f0-9]{64}' | head -1 | sed 's/sha256://')
+    echo "$digest"
+}
+
 # =============================================================================
 # Test Infrastructure
 # =============================================================================
@@ -667,6 +713,8 @@ TEST_DEPENDS[test_view_snapshot]="test_pull_image"
 TEST_DEPENDS[test_commit]="test_pull_image"
 TEST_DEPENDS[test_rwlayer_creation]="test_pull_image"
 TEST_DEPENDS[test_snapshot_cleanup]="test_pull_image"
+TEST_DEPENDS[test_vmdk_layer_order]="test_multi_layer"
+TEST_DEPENDS[test_vmdk_format_valid]="test_multi_layer"
 
 # Check if test dependencies are met
 check_test_dependencies() {
@@ -676,6 +724,7 @@ check_test_dependencies() {
     if [ -n "$dep" ] && [ "${TEST_RESULTS[$dep]:-}" != "PASS" ]; then
         log_warn "Skipping $test (dependency $dep not passed)"
         TEST_RESULTS[$test]="SKIPPED"
+        TEST_MESSAGES[$test]="Dependency $dep not passed"
         return 1
     fi
 
@@ -921,7 +970,7 @@ test_multi_layer() {
     fi
 
     # Find the top-level committed snapshot from the multi-layer image
-    # This is the one with the most parent layers
+    # Look for snapshots with nginx in the name or the most recent one
     local top_snap
     top_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls | grep -v "^KEY" | grep "Committed" | tail -1 | awk '{print $1}')
 
@@ -929,13 +978,15 @@ test_multi_layer() {
         log_error "Could not find top-level committed snapshot"
         return 1
     fi
+
+    # Store for dependent tests
     log_info "Top-level snapshot: $top_snap"
 
     # Create a view mount to trigger VMDK generation
     # VMDK is only generated when View() is called, not just when pulling
-    local view_name="test-multi-view-${TEST_NAMESPACE}"
+    MULTI_LAYER_VIEW_NAME="test-multi-view-${TEST_NAMESPACE}"
     log_info "Creating view to trigger VMDK generation..."
-    if ! ctr_cmd snapshots --snapshotter nexus-erofs view "$view_name" "$top_snap" >/dev/null 2>&1; then
+    if ! ctr_cmd snapshots --snapshotter nexus-erofs view "$MULTI_LAYER_VIEW_NAME" "$top_snap" >/dev/null 2>&1; then
         log_error "Failed to create view snapshot"
         return 1
     fi
@@ -949,7 +1000,8 @@ test_multi_layer() {
 
     if [ "$vmdk_count" -eq 0 ]; then
         log_error "No VMDK descriptors found for multi-layer image"
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$view_name" 2>/dev/null || true
+        ctr_cmd snapshots --snapshotter nexus-erofs rm "$MULTI_LAYER_VIEW_NAME" 2>/dev/null || true
+        MULTI_LAYER_VIEW_NAME=""
         return 1
     fi
     log_info "VMDK descriptors generated: $vmdk_count"
@@ -960,12 +1012,14 @@ test_multi_layer() {
 
     if [ "$fsmeta_count" -eq 0 ]; then
         log_error "No fsmeta.erofs found for multi-layer image"
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$view_name" 2>/dev/null || true
+        ctr_cmd snapshots --snapshotter nexus-erofs rm "$MULTI_LAYER_VIEW_NAME" 2>/dev/null || true
+        MULTI_LAYER_VIEW_NAME=""
         return 1
     fi
     log_info "Fsmeta files generated: $fsmeta_count"
 
     # Don't clean up - leave view for test_vmdk_layer_order to verify
+    log_info "View snapshot preserved for dependent tests: $MULTI_LAYER_VIEW_NAME"
 }
 
 # =============================================================================
@@ -1031,8 +1085,8 @@ test_erofs_layers() {
 #
 # Expectations:
 #   - Find VMDK with multiple layers (from test_multi_layer)
-#   - VMDK layers are ordered top-to-bottom (newest first, base last)
 #   - fsmeta.erofs is in extent 0 (first position)
+#   - VMDK layers are ordered top-to-bottom (newest first, base last)
 #   - All layer files referenced in VMDK exist on disk
 #   - Layer order matches the snapshot chain walk via containerd API
 # =============================================================================
@@ -1067,11 +1121,10 @@ test_vmdk_layer_order() {
     # =========================================================================
     # Step 1: Parse VMDK and extract layer order with extent numbers
     # =========================================================================
-    # VMDK format: RW <sectors> FLAT "<path>" <offset>
-    # Extent number determines the order in the virtual disk
-
-    local -a vmdk_extents=()      # Array of "extent_num:digest" pairs
+    local -a vmdk_extents=()      # Array of "extent_num:path:digest" entries
+    local -a vmdk_digests=()      # Just the digests in order
     local fsmeta_extent=""
+    local fsmeta_path=""
     local extent_num=0
 
     while IFS= read -r line; do
@@ -1082,11 +1135,15 @@ test_vmdk_layer_order() {
 
             if [[ "$layer_name" == "fsmeta.erofs" ]]; then
                 fsmeta_extent=$extent_num
+                fsmeta_path="$layer_path"
                 log_debug "Extent $extent_num: fsmeta.erofs"
             elif [[ "$layer_name" =~ ^sha256-([a-f0-9]+)\.erofs$ ]]; then
                 local digest="${BASH_REMATCH[1]}"
-                vmdk_extents+=("${extent_num}:${digest}")
+                vmdk_extents+=("${extent_num}:${layer_path}:${digest}")
+                vmdk_digests+=("$digest")
                 log_debug "Extent $extent_num: sha256:${digest:0:12}..."
+            else
+                log_debug "Extent $extent_num: $layer_name (unknown format)"
             fi
 
             extent_num=$((extent_num + 1))
@@ -1098,24 +1155,50 @@ test_vmdk_layer_order() {
     # =========================================================================
     if [ -z "$fsmeta_extent" ]; then
         log_error "CRITICAL: fsmeta.erofs not found in VMDK - VM will not boot!"
+        log_error "VMDK contents:"
+        cat "$vmdk_file" >&2
         return 1
     fi
 
     if [ "$fsmeta_extent" -ne 0 ]; then
         log_error "CRITICAL: fsmeta.erofs is at extent $fsmeta_extent, must be at extent 0 - VM will not boot!"
+        log_error "VMDK contents:"
+        cat "$vmdk_file" >&2
         return 1
     fi
     log_info "✓ fsmeta.erofs correctly positioned at extent 0"
 
     # =========================================================================
-    # Step 3: Extract layer digests in VMDK order (should be newest->oldest)
+    # Step 3: Verify all layer files exist on disk
     # =========================================================================
-    local -a vmdk_digests=()
+    log_info "Verifying all VMDK layer files exist..."
+    local missing_count=0
+
+    # Check fsmeta
+    if [ -n "$fsmeta_path" ] && [ ! -f "$fsmeta_path" ]; then
+        log_error "Missing fsmeta file: $fsmeta_path"
+        ((missing_count++))
+    fi
+
+    # Check layer files
     for entry in "${vmdk_extents[@]}"; do
-        local digest="${entry#*:}"
-        vmdk_digests+=("$digest")
+        local layer_path
+        layer_path=$(echo "$entry" | cut -d: -f2)
+        if [ ! -f "$layer_path" ]; then
+            log_error "Missing layer file: $layer_path"
+            ((missing_count++))
+        fi
     done
 
+    if [ "$missing_count" -gt 0 ]; then
+        log_error "VMDK references $missing_count missing layer files - VM will not boot!"
+        return 1
+    fi
+    log_info "✓ All layer files exist (fsmeta + ${#vmdk_digests[@]} layers)"
+
+    # =========================================================================
+    # Step 4: Display VMDK layer order
+    # =========================================================================
     if [ ${#vmdk_digests[@]} -lt 2 ]; then
         log_error "Expected multiple layers in VMDK, found ${#vmdk_digests[@]}"
         return 1
@@ -1127,114 +1210,64 @@ test_vmdk_layer_order() {
     done
 
     # =========================================================================
-    # Step 4: Verify all layer files exist on disk
-    # =========================================================================
-    log_info "Verifying all VMDK layer files exist..."
-    local missing_count=0
-
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^RW[[:space:]]+[0-9]+[[:space:]]+FLAT[[:space:]]+\"([^\"]+)\" ]]; then
-            local layer_path="${BASH_REMATCH[1]}"
-            if [ ! -f "$layer_path" ]; then
-                log_error "Missing layer file: $layer_path"
-                ((missing_count++))
-            fi
-        fi
-    done < "$vmdk_file"
-
-    if [ "$missing_count" -gt 0 ]; then
-        log_error "VMDK references $missing_count missing layer files - VM will not boot!"
-        return 1
-    fi
-    log_info "✓ All ${#vmdk_digests[@]} layer files exist"
-
-    # =========================================================================
     # Step 5: Walk snapshot chain using containerd API to get expected order
     # =========================================================================
-    # Get the snapshot name from the VMDK directory
-    local snap_dir
-    snap_dir=$(dirname "$vmdk_file")
-    local snap_id
-    snap_id=$(basename "$snap_dir")
+    log_info "Walking snapshot chain to verify layer order..."
 
-    log_info "Walking snapshot chain for snapshot: $snap_id"
-
-    # Find the snapshot name that corresponds to this directory
-    # We need to query containerd to get the actual parent chain
+    # Start from the view snapshot we created (or find it)
     local current_snap=""
 
-    # Try to find the snapshot by matching the directory
-    while IFS= read -r line; do
-        # Skip header
-        [[ "$line" =~ ^KEY ]] && continue
-
-        local snap_key
-        snap_key=$(echo "$line" | awk '{print $1}')
-
-        # Get snapshot info to find its storage location
-        local snap_info
-        snap_info=$(ctr_cmd snapshots --snapshotter nexus-erofs info "$snap_key" 2>/dev/null) || continue
-
-        # Check if this snapshot's name matches our view snapshot
-        if echo "$snap_info" | grep -q "Name:.*test-multi-view"; then
-            current_snap="$snap_key"
-            break
-        fi
-    done < <(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null)
-
-    # If we couldn't find the view snapshot, try to find by the directory ID
-    if [ -z "$current_snap" ]; then
-        # Walk all snapshots to find one that uses this directory
-        log_debug "Searching for snapshot using directory $snap_id..."
+    if [ -n "$MULTI_LAYER_VIEW_NAME" ]; then
+        # Use the view snapshot name from test_multi_layer
+        current_snap="$MULTI_LAYER_VIEW_NAME"
+        log_debug "Using view snapshot from test_multi_layer: $current_snap"
+    else
+        # Find view snapshots
         current_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null | \
             grep -v "^KEY" | grep "test-multi-view" | head -1 | awk '{print $1}')
     fi
 
     if [ -z "$current_snap" ]; then
-        log_warn "Could not identify snapshot from VMDK path, trying alternative approach..."
-        # Fall back to finding the top-level snapshot from multi-layer image
+        # Fall back to finding by VMDK path
+        local snap_dir
+        snap_dir=$(dirname "$vmdk_file")
+        local snap_id
+        snap_id=$(basename "$snap_dir")
+        log_debug "Attempting to find snapshot for directory: $snap_id"
+
+        # Try to find any snapshot that might match
         current_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null | \
-            grep -v "^KEY" | grep -v "test-" | tail -1 | awk '{print $1}')
+            grep -v "^KEY" | tail -1 | awk '{print $1}')
     fi
 
     if [ -z "$current_snap" ]; then
         log_error "Could not find snapshot to verify chain order"
-        return 1
+        if [ "$STRICT_MODE" = "true" ]; then
+            return 1
+        fi
+        log_warn "Skipping chain verification (use --strict to fail)"
+        return 0
     fi
 
     log_info "Starting chain walk from snapshot: $current_snap"
 
     # Walk the parent chain using containerd snapshots info
     local -a chain_digests=()
-    local visited_snaps=""
+    local -A visited_snaps=()
     local max_depth=20  # Prevent infinite loops
     local depth=0
 
     while [ -n "$current_snap" ] && [ $depth -lt $max_depth ]; do
         # Prevent cycles
-        if echo "$visited_snaps" | grep -q ":${current_snap}:"; then
+        if [ -n "${visited_snaps[$current_snap]:-}" ]; then
             log_warn "Cycle detected in snapshot chain at: $current_snap"
             break
         fi
-        visited_snaps="${visited_snaps}:${current_snap}:"
+        visited_snaps[$current_snap]=1
 
-        # Get snapshot info
-        local snap_info
-        snap_info=$(ctr_cmd snapshots --snapshotter nexus-erofs info "$current_snap" 2>/dev/null)
-
-        if [ -z "$snap_info" ]; then
-            log_debug "No info for snapshot: $current_snap"
-            break
-        fi
-
-        # Extract parent from snapshot info
-        local parent
-        parent=$(echo "$snap_info" | grep "Parent:" | sed 's/.*Parent:[[:space:]]*//' | tr -d '"')
-
-        # Extract labels to find the layer digest
-        # Labels typically contain: containerd.io/snapshot/cri.layer-digest=sha256:...
+        # Get layer digest from snapshot labels
         local layer_digest
-        layer_digest=$(echo "$snap_info" | grep -o 'sha256:[a-f0-9]\{64\}' | head -1 | sed 's/sha256://')
+        layer_digest=$(get_snapshot_layer_digest "$current_snap")
 
         if [ -n "$layer_digest" ]; then
             chain_digests+=("$layer_digest")
@@ -1243,8 +1276,11 @@ test_vmdk_layer_order() {
             log_debug "  Chain[$depth]: no digest found (snap: $current_snap)"
         fi
 
-        # Move to parent
-        if [ -z "$parent" ] || [ "$parent" = '""' ] || [ "$parent" = "null" ]; then
+        # Get parent snapshot
+        local parent
+        parent=$(get_snapshot_parent "$current_snap")
+
+        if [ -z "$parent" ]; then
             log_debug "Reached root of snapshot chain"
             break
         fi
@@ -1255,13 +1291,16 @@ test_vmdk_layer_order() {
 
     if [ ${#chain_digests[@]} -eq 0 ]; then
         log_warn "Could not extract digests from snapshot chain"
-        log_warn "Falling back to file-based verification only"
 
-        # Even without chain verification, we can verify layer file timestamps
-        # Newer layers should have more recent modification times
-        log_info "Verifying layer order by file metadata..."
+        if [ "$STRICT_MODE" = "true" ]; then
+            log_error "STRICT MODE: Cannot verify VMDK layer order without chain digests"
+            return 1
+        fi
 
-        local prev_mtime=0
+        # Fall back to file timestamp verification
+        log_info "Falling back to file timestamp verification..."
+
+        local prev_mtime=999999999999
         local order_valid=true
 
         for digest in "${vmdk_digests[@]}"; do
@@ -1272,9 +1311,8 @@ test_vmdk_layer_order() {
                 local mtime
                 mtime=$(stat -c %Y "$layer_file" 2>/dev/null || echo 0)
 
-                # For proper ordering, earlier extents (newer layers) should have >= mtime
-                # than later extents (older/base layers)
-                if [ $prev_mtime -ne 0 ] && [ $mtime -gt $prev_mtime ]; then
+                # For proper ordering, later extents (older/base layers) should have <= mtime
+                if [ $mtime -gt $prev_mtime ]; then
                     log_warn "Layer ${digest:0:12} (mtime: $mtime) is newer than previous layer (mtime: $prev_mtime)"
                     log_warn "This may indicate incorrect layer ordering"
                     order_valid=false
@@ -1284,13 +1322,12 @@ test_vmdk_layer_order() {
         done
 
         if [ "$order_valid" = "true" ]; then
-            log_info "✓ Layer file timestamps consistent with VMDK order"
+            log_info "✓ Layer file timestamps consistent with expected order"
         else
             log_warn "⚠ Layer timestamps suggest possible ordering issue"
-            # Don't fail here as timestamps aren't definitive
         fi
 
-        log_info "✓ VMDK structure verified (chain walk unavailable)"
+        log_info "✓ VMDK structure verified (chain walk unavailable, used timestamp fallback)"
         return 0
     fi
 
@@ -1317,6 +1354,8 @@ test_vmdk_layer_order() {
             log_error "  VMDK has:  sha256:${vmdk_digest:0:12}..."
             log_error "  Chain has: sha256:${chain_digest:0:12}..."
             mismatch=true
+        else
+            log_debug "  Position $((i+1)) matches: sha256:${vmdk_digest:0:12}..."
         fi
     done
 
@@ -1333,12 +1372,21 @@ test_vmdk_layer_order() {
         # Dump full details for debugging
         echo ""
         echo "VMDK file contents:"
+        echo "──────────────────────────────────────────"
         cat "$vmdk_file"
         echo ""
-        echo "Expected order (from snapshot chain):"
-        printf "  1. fsmeta.erofs\n"
+        echo "Expected layer order (from snapshot chain):"
+        echo "──────────────────────────────────────────"
+        printf "  0. fsmeta.erofs\n"
         for i in "${!chain_digests[@]}"; do
-            printf "  %d. sha256-%s.erofs\n" "$((i+2))" "${chain_digests[$i]}"
+            printf "  %d. sha256-%s.erofs\n" "$((i+1))" "${chain_digests[$i]}"
+        done
+        echo ""
+        echo "Actual layer order (from VMDK):"
+        echo "──────────────────────────────────────────"
+        printf "  0. fsmeta.erofs\n"
+        for i in "${!vmdk_digests[@]}"; do
+            printf "  %d. sha256-%s.erofs\n" "$((i+1))" "${vmdk_digests[$i]}"
         done
 
         return 1
@@ -1348,9 +1396,16 @@ test_vmdk_layer_order() {
     return 0
 }
 
-
 # =============================================================================
-# Additional helper: Verify VMDK can be parsed by common tools
+# Test: test_vmdk_format_valid
+# =============================================================================
+# Goal: Verify VMDK descriptor format is valid and can be parsed by VM tools.
+#
+# Expectations:
+#   - VMDK has all required descriptor fields (version, CID, createType)
+#   - createType is appropriate for flat file access
+#   - Extent definitions are properly formatted
+#   - Total size is reasonable
 # =============================================================================
 test_vmdk_format_valid() {
     log_info "Verifying VMDK descriptor format..."
@@ -1363,6 +1418,8 @@ test_vmdk_format_valid() {
         return 1
     fi
 
+    log_info "Checking VMDK: $vmdk_file"
+
     # Check required VMDK descriptor fields
     local required_fields=(
         "version="
@@ -1370,12 +1427,18 @@ test_vmdk_format_valid() {
         "createType="
     )
 
+    local missing_fields=0
     for field in "${required_fields[@]}"; do
         if ! grep -q "$field" "$vmdk_file"; then
             log_error "VMDK missing required field: $field"
-            return 1
+            missing_fields=$((missing_fields + 1))
         fi
     done
+
+    if [ "$missing_fields" -gt 0 ]; then
+        log_error "VMDK is missing $missing_fields required fields"
+        return 1
+    fi
     log_info "✓ VMDK has all required descriptor fields"
 
     # Verify createType is appropriate for our use case
@@ -1384,8 +1447,12 @@ test_vmdk_format_valid() {
 
     # We expect monolithicFlat or similar for direct file access
     case "$create_type" in
-        monolithicFlat|vmfs|vmfsSparse)
+        monolithicFlat|vmfs|vmfsSparse|twoGbMaxExtentFlat)
             log_info "✓ VMDK createType is valid: $create_type"
+            ;;
+        "")
+            log_error "VMDK createType is empty"
+            return 1
             ;;
         *)
             log_warn "Unexpected VMDK createType: $create_type (may still work)"
@@ -1402,6 +1469,23 @@ test_vmdk_format_valid() {
     fi
     log_info "✓ VMDK has $extent_count extent definitions"
 
+    # Verify extent format: RW <sectors> FLAT "<path>" <offset>
+    local bad_extents=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^RW ]]; then
+            if ! [[ "$line" =~ ^RW[[:space:]]+[0-9]+[[:space:]]+FLAT[[:space:]]+\"[^\"]+\"[[:space:]]+[0-9]+ ]]; then
+                log_error "Malformed extent line: $line"
+                bad_extents=$((bad_extents + 1))
+            fi
+        fi
+    done < "$vmdk_file"
+
+    if [ "$bad_extents" -gt 0 ]; then
+        log_error "VMDK has $bad_extents malformed extent definitions"
+        return 1
+    fi
+    log_info "✓ All extent definitions are properly formatted"
+
     # Verify total size is reasonable (sum of all extent sectors)
     local total_sectors=0
     while IFS= read -r line; do
@@ -1412,7 +1496,20 @@ test_vmdk_format_valid() {
 
     # Convert to MB (512 bytes per sector)
     local total_mb=$((total_sectors * 512 / 1024 / 1024))
+
+    if [ "$total_mb" -lt 1 ]; then
+        log_error "VMDK total size is suspiciously small: ${total_mb}MB"
+        return 1
+    fi
+
     log_info "✓ VMDK total size: ${total_mb}MB ($total_sectors sectors)"
+
+    # Verify version number
+    local version
+    version=$(grep "version=" "$vmdk_file" | head -1 | sed 's/.*version=//' | tr -d ' ')
+    if [ -n "$version" ]; then
+        log_info "✓ VMDK version: $version"
+    fi
 
     return 0
 }
@@ -1538,17 +1635,7 @@ test_snapshot_cleanup() {
 # =============================================================================
 # Test: test_rwlayer_creation
 # =============================================================================
-# Goal: Verify that active (writable) snapshots create rwlayer.img files
-#       which serve as the writable layer for container modifications.
-#
-# Expectations:
-#   - Can create an active snapshot from a committed parent
-#   - rwlayer.img file is created in the snapshots directory
-#   - At least one rwlayer.img exists after preparation
-#   - Cleanup removes the test snapshot
-#
-# The rwlayer.img is a sparse file that captures all writes made by the
-# container. It's essential for the copy-on-write semantics of containers.
+# Goal: Verify rwlayer.img is created for active snapshots
 # =============================================================================
 test_rwlayer_creation() {
     # Get a committed snapshot from the pulled image (prepare requires Committed parent)
@@ -1579,22 +1666,17 @@ test_rwlayer_creation() {
 # =============================================================================
 # Test: test_full_cleanup_no_leaks
 # =============================================================================
-# Goal: Verify that removing all images and snapshots leaves no orphaned files
-#       or leaked resources on disk.
-#
-# Expectations:
-#   - All images can be removed via containerd API
-#   - All snapshots can be removed via containerd API
-#   - No snapshots remain in registry after cleanup
-#   - No orphaned directories remain in snapshots folder
-#   - No leaked .erofs, .vmdk, or rwlayer.img files
-#
-# This is a critical test for resource management - leaked files would
-# accumulate over time and waste disk space. This test should run last
-# as it removes all test artifacts.
+# Goal: Full cleanup - delete everything and verify no leaking files
 # =============================================================================
 test_full_cleanup_no_leaks() {
     log_info "Starting full cleanup test..."
+
+    # First clean up the multi-layer view if it exists
+    if [ -n "$MULTI_LAYER_VIEW_NAME" ]; then
+        log_debug "Cleaning up multi-layer view: $MULTI_LAYER_VIEW_NAME"
+        ctr_cmd snapshots --snapshotter nexus-erofs rm "$MULTI_LAYER_VIEW_NAME" 2>/dev/null || true
+        MULTI_LAYER_VIEW_NAME=""
+    fi
 
     # Get list of all images
     local images
@@ -1720,6 +1802,7 @@ ALL_TESTS=(
     test_view_snapshot
     test_erofs_layers
     test_multi_layer
+    test_vmdk_format_valid
     test_vmdk_layer_order
     test_rwlayer_creation
     test_snapshot_cleanup
@@ -1790,6 +1873,7 @@ EOF
     for test in "${ALL_TESTS[@]}"; do
         local duration="${TEST_TIMES[$test]:-0}"
         local status="${TEST_RESULTS[$test]:-UNKNOWN}"
+        local message="${TEST_MESSAGES[$test]:-}"
         local test_name="${test#test_}"
 
         case "$status" in
@@ -1799,14 +1883,14 @@ EOF
             FAIL)
                 cat >> "$output_file" <<TESTCASE
     <testcase name="$test_name" classname="nexus-erofs.$test_name" time="$duration">
-      <failure message="Test failed">Test $test_name failed. Check logs for details.</failure>
+      <failure message="Test failed">${message:-Test $test_name failed. Check logs for details.}</failure>
     </testcase>
 TESTCASE
                 ;;
             SKIPPED)
                 cat >> "$output_file" <<TESTCASE
     <testcase name="$test_name" classname="nexus-erofs.$test_name" time="$duration">
-      <skipped message="Test skipped">Test dependencies not met</skipped>
+      <skipped message="Test skipped">${message:-Test dependencies not met}</skipped>
     </testcase>
 TESTCASE
                 ;;
@@ -1890,6 +1974,10 @@ main() {
 
     if [ "$VERBOSE" = "true" ]; then
         log_info "Verbose mode: enabled"
+    fi
+
+    if [ "$STRICT_MODE" = "true" ]; then
+        log_info "Strict mode: enabled (tests will fail if verification is incomplete)"
     fi
 
     if [ -n "$JUNIT_OUTPUT" ]; then
