@@ -14,6 +14,13 @@ import (
 
 // mountFsMeta returns a mount for merged fsmeta.erofs if VMDK exists.
 // When VMDK exists, the consumer can use a single virtio-blk device for all layers.
+//
+// The mount type is "format/erofs" (not plain "erofs") to signal that this is a
+// VM-only mount requiring special handling. Containerd's standard mount manager
+// will reject "format/erofs" with a clear "unsupported mount type" error, rather
+// than the cryptic EINVAL that occurs when it tries to mount EROFS with file paths
+// in device= options. VM runtimes (like qemubox) and the custom mountutils.MountAll()
+// understand this type and handle it correctly.
 func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 	if len(snap.ParentIDs) == 0 {
 		return mount.Mount{}, false
@@ -45,7 +52,7 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 
 	return mount.Mount{
 		Source:  fsmetaFile,
-		Type:    "erofs",
+		Type:    "format/erofs",
 		Options: append([]string{"ro", "loop"}, deviceOptions...),
 	}, true
 }
