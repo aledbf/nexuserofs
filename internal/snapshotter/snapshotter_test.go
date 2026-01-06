@@ -315,11 +315,18 @@ func TestSnapshotterPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("layerBlobPath", func(t *testing.T) {
-		got := s.layerBlobPath("123")
-		want := filepath.Join(root, "snapshots", "123", "layer.erofs")
+	t.Run("fallbackLayerBlobPath", func(t *testing.T) {
+		got := s.fallbackLayerBlobPath("123")
+		want := filepath.Join(root, "snapshots", "123", "snapshot-123.erofs")
 		if got != want {
-			t.Errorf("layerBlobPath(123) = %q, want %q", got, want)
+			t.Errorf("fallbackLayerBlobPath(123) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("findLayerBlob_notFound", func(t *testing.T) {
+		_, err := s.findLayerBlob("nonexistent")
+		if err == nil {
+			t.Error("findLayerBlob(nonexistent) should return error")
 		}
 	})
 
