@@ -1706,7 +1706,7 @@ test_rwlayer_creation() {
 #       stop (unmount), commit, and verify the file exists in the new image.
 #
 # This simulates what happens with a real VM without actually running one:
-#   1. Create active snapshot (format/erofs + ext4 mounts)
+#   1. Use nerdctl create to create a container (creates proper snapshot)
 #   2. Mount the ext4 rwlayer.img on host
 #   3. Write a test file to /rw/upper/ (where VM overlay writes go)
 #   4. Unmount ext4
@@ -1724,44 +1724,29 @@ test_commit_lifecycle() {
 
     log_info "Testing full container commit lifecycle..."
 
-    # Get top-level committed snapshot from pulled image
-    local parent_snap
-    parent_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls | grep -v "^KEY" | grep "Committed" | tail -1 | awk '{print $1}')
+    # Use nerdctl to create a container - this properly sets up the snapshot
+    local container_name="lifecycle-${TEST_NAMESPACE}"
+    log_info "Creating container via nerdctl..."
 
-    assert_not_empty "$parent_snap" "Committed parent snapshot should exist" || return 1
-    log_info "Using parent snapshot: $parent_snap"
-
-    # Create an active snapshot (NOT extract- prefix - this gives real mounts)
-    local container_id="lifecycle-test-${TEST_NAMESPACE}"
-    if ! ctr_cmd snapshots --snapshotter nexus-erofs prepare "$container_id" "$parent_snap" >/dev/null; then
-        log_error "Failed to prepare active snapshot"
+    # Create container (don't start it - we'll simulate the VM)
+    if ! nerdctl --snapshotter nexus-erofs create --name "$container_name" "${TEST_IMAGE}" /bin/sh 2>&1; then
+        log_error "Failed to create container via nerdctl"
         return 1
     fi
-    log_info "Created active snapshot: $container_id"
+    log_info "✓ Created container: $container_name"
 
-    # Get mounts to see what type we got
-    local mounts
-    mounts=$(ctr_cmd snapshots --snapshotter nexus-erofs mounts /tmp/mnt "$container_id" 2>&1)
-    log_debug "Active snapshot mounts: $mounts"
+    # Find the rwlayer.img for this container's snapshot
+    # nerdctl creates a snapshot with the container ID
+    sleep 0.5  # Give time for snapshot to be created
 
-    # Find rwlayer.img for this snapshot
-    local rwlayer_path=""
-    while IFS= read -r img; do
-        # Check if this rwlayer is for our snapshot by looking at mount output
-        if echo "$mounts" | grep -q "$(dirname "$img")"; then
-            rwlayer_path="$img"
-            break
-        fi
-    done < <(find "${SNAPSHOTTER_ROOT}/snapshots" -name "rwlayer.img" 2>/dev/null)
-
-    # If we couldn't match by mount, just find the most recent rwlayer.img
-    if [ -z "$rwlayer_path" ]; then
-        rwlayer_path=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "rwlayer.img" -newer /tmp/containerd.pid 2>/dev/null | head -1)
-    fi
+    # Find the most recent rwlayer.img
+    local rwlayer_path
+    rwlayer_path=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "rwlayer.img" -type f -printf '%T@ %p\n' 2>/dev/null | \
+        sort -rn | head -1 | cut -d' ' -f2-)
 
     if [ -z "$rwlayer_path" ]; then
-        log_error "Could not find rwlayer.img for active snapshot"
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        log_error "Could not find rwlayer.img for container"
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         return 1
     fi
     log_info "Found rwlayer.img: $rwlayer_path"
@@ -1776,7 +1761,7 @@ test_commit_lifecycle() {
     loop_dev=$(losetup -f --show "$rwlayer_path" 2>/dev/null)
     if [ -z "$loop_dev" ]; then
         log_error "Failed to setup loop device for rwlayer.img"
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         rmdir "$mount_point" 2>/dev/null || true
         return 1
     fi
@@ -1785,7 +1770,7 @@ test_commit_lifecycle() {
     if ! mount -t ext4 "$loop_dev" "$mount_point" 2>&1; then
         log_error "Failed to mount ext4"
         losetup -d "$loop_dev" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         rmdir "$mount_point" 2>/dev/null || true
         return 1
     fi
@@ -1807,7 +1792,7 @@ test_commit_lifecycle() {
         log_error "Test file was not created"
         umount "$mount_point" 2>/dev/null || true
         losetup -d "$loop_dev" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         rmdir "$mount_point" 2>/dev/null || true
         return 1
     fi
@@ -1818,7 +1803,7 @@ test_commit_lifecycle() {
     if ! umount "$mount_point" 2>&1; then
         log_error "Failed to unmount ext4"
         losetup -d "$loop_dev" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         rmdir "$mount_point" 2>/dev/null || true
         return 1
     fi
@@ -1829,67 +1814,37 @@ test_commit_lifecycle() {
     log_info "✓ Unmounted and detached loop device"
 
     # Now commit using nerdctl
-    # First we need to create a container reference that nerdctl understands
-    # The easiest way is to use ctr to run a "fake" container
     log_info "Committing changes via nerdctl..."
-
-    # Create a container using ctr (it won't actually run, just registers)
-    local ctr_container="lifecycle-ctr-${TEST_NAMESPACE}"
-    if ! ctr_cmd containers create \
-        --snapshotter nexus-erofs \
-        --snapshot "$container_id" \
-        "${TEST_IMAGE}" \
-        "$ctr_container" 2>&1; then
-        log_warn "Could not create container reference, trying direct commit..."
-    fi
-
-    # Try nerdctl commit
     local new_image="localhost/lifecycle-test:${TEST_NAMESPACE}"
 
-    # nerdctl needs the container to be "stopped" state, which our fake container is
-    if nerdctl --snapshotter nexus-erofs commit "$ctr_container" "$new_image" 2>&1; then
-        log_info "✓ nerdctl commit succeeded"
-    else
-        log_warn "nerdctl commit failed, checking if image was created anyway..."
+    if ! nerdctl --snapshotter nexus-erofs commit "$container_name" "$new_image" 2>&1; then
+        log_error "nerdctl commit failed"
+        nerdctl rm -f "$container_name" 2>/dev/null || true
+        return 1
     fi
+    log_info "✓ nerdctl commit succeeded"
 
     # Verify new image exists
-    if ! ctr_cmd images ls | grep -q "lifecycle-test"; then
+    if ! nerdctl --snapshotter nexus-erofs images | grep -q "lifecycle-test"; then
         log_error "New image not found after commit"
-        ctr_cmd containers rm "$ctr_container" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         return 1
     fi
     log_info "✓ New image created: $new_image"
 
-    # Find the snapshot created for the new image and verify the EROFS layer size
+    # Find the EROFS layer file for the new image
     # The committed layer should be at least 500KB (we wrote 1MB, compression varies)
     local min_layer_size=500000  # 500KB minimum
 
-    # Get the new snapshot (should be the most recent committed one)
-    local new_snap
-    new_snap=$(ctr_cmd snapshots --snapshotter nexus-erofs ls | grep -v "^KEY" | grep "Committed" | tail -1 | awk '{print $1}')
-
-    if [ -z "$new_snap" ]; then
-        log_error "Could not find committed snapshot for new image"
-        ctr_cmd images rm "$new_image" 2>/dev/null || true
-        ctr_cmd containers rm "$ctr_container" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
-        return 1
-    fi
-    log_debug "New committed snapshot: $new_snap"
-
-    # Find the EROFS layer file for this snapshot
     # Look for the most recently created .erofs file
     local new_layer
-    new_layer=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "*.erofs" -newer /tmp/containerd.pid -type f -printf '%T@ %p\n' 2>/dev/null | \
+    new_layer=$(find "${SNAPSHOTTER_ROOT}/snapshots" -name "*.erofs" -type f -printf '%T@ %p\n' 2>/dev/null | \
         sort -rn | head -1 | cut -d' ' -f2-)
 
     if [ -z "$new_layer" ]; then
-        log_error "Could not find EROFS layer file for committed snapshot"
-        ctr_cmd images rm "$new_image" 2>/dev/null || true
-        ctr_cmd containers rm "$ctr_container" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        log_error "Could not find EROFS layer file for committed image"
+        nerdctl --snapshotter nexus-erofs rmi "$new_image" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         return 1
     fi
 
@@ -1901,17 +1856,15 @@ test_commit_lifecycle() {
         log_error "CRITICAL: Committed layer is too small (${layer_size} bytes < ${min_layer_size} bytes)"
         log_error "The 1MB test file was NOT captured in the commit!"
         log_error "This indicates the diff service is not properly reading the ext4 upper directory."
-        ctr_cmd images rm "$new_image" 2>/dev/null || true
-        ctr_cmd containers rm "$ctr_container" 2>/dev/null || true
-        ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+        nerdctl --snapshotter nexus-erofs rmi "$new_image" 2>/dev/null || true
+        nerdctl rm -f "$container_name" 2>/dev/null || true
         return 1
     fi
     log_info "✓ Layer size verified: ${layer_size} bytes (expected >= ${min_layer_size})"
 
     # Clean up
-    ctr_cmd images rm "$new_image" 2>/dev/null || true
-    ctr_cmd containers rm "$ctr_container" 2>/dev/null || true
-    ctr_cmd snapshots --snapshotter nexus-erofs rm "$container_id" 2>/dev/null || true
+    nerdctl --snapshotter nexus-erofs rmi "$new_image" 2>/dev/null || true
+    nerdctl rm -f "$container_name" 2>/dev/null || true
 
     log_info "✓ Full lifecycle test PASSED - commit captured changes correctly"
     return 0
