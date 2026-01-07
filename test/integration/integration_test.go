@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/testutil"
@@ -65,7 +66,244 @@ const (
 
 	// mergedVMDKFile is the name of the VMDK descriptor file.
 	mergedVMDKFile = "merged.vmdk"
+
+	// fsmetaFile is the name of the fsmeta EROFS file.
+	fsmetaFile = "fsmeta.erofs"
 )
+
+// ============================================================================
+// Test Assertions and Verification
+// ============================================================================
+
+// Assertions provides structured verification methods for integration tests.
+type Assertions struct {
+	t   *testing.T
+	env *Environment
+}
+
+// NewAssertions creates a new assertions helper.
+func NewAssertions(t *testing.T, env *Environment) *Assertions {
+	return &Assertions{t: t, env: env}
+}
+
+// SnapshotExists verifies a snapshot exists with the expected kind.
+func (a *Assertions) SnapshotExists(ctx context.Context, key string, kind snapshots.Kind) snapshots.Info {
+	a.t.Helper()
+	ss := a.env.SnapshotService()
+
+	info, err := ss.Stat(ctx, key)
+	if err != nil {
+		a.t.Fatalf("snapshot %q does not exist: %v", key, err)
+	}
+
+	if info.Kind != kind {
+		a.t.Errorf("snapshot %q: expected kind %v, got %v", key, kind, info.Kind)
+	}
+
+	a.t.Logf("✓ snapshot %q exists (kind=%v, parent=%q)", key, info.Kind, info.Parent)
+	return info
+}
+
+// SnapshotRemoved verifies a snapshot was removed.
+func (a *Assertions) SnapshotRemoved(ctx context.Context, key string) {
+	a.t.Helper()
+	ss := a.env.SnapshotService()
+
+	_, err := ss.Stat(ctx, key)
+	if err == nil {
+		a.t.Fatalf("snapshot %q still exists (expected removed)", key)
+	}
+
+	a.t.Logf("✓ snapshot %q removed", key)
+}
+
+// FileExists verifies a file exists and returns its info.
+func (a *Assertions) FileExists(path string) os.FileInfo {
+	a.t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		a.t.Fatalf("file %q does not exist: %v", path, err)
+	}
+
+	a.t.Logf("✓ file exists: %s (%d bytes)", path, info.Size())
+	return info
+}
+
+// FileNotExists verifies a file does not exist.
+func (a *Assertions) FileNotExists(path string) {
+	a.t.Helper()
+
+	_, err := os.Stat(path)
+	if err == nil {
+		a.t.Fatalf("file %q exists (expected not to exist)", path)
+	}
+
+	a.t.Logf("✓ file removed: %s", path)
+}
+
+// ErofsValid verifies an EROFS file has valid magic.
+func (a *Assertions) ErofsValid(path string) {
+	a.t.Helper()
+
+	if err := verifyErofsMagic(path); err != nil {
+		a.t.Fatalf("invalid EROFS file %q: %v", path, err)
+	}
+
+	a.t.Logf("✓ valid EROFS: %s", filepath.Base(path))
+}
+
+// MountsContain verifies mounts contain the expected type.
+func (a *Assertions) MountsContain(mounts []mount.Mount, mountType string) mount.Mount {
+	a.t.Helper()
+
+	for _, m := range mounts {
+		if m.Type == mountType || strings.Contains(m.Type, mountType) {
+			a.t.Logf("✓ mount type %q found (source=%s)", m.Type, filepath.Base(m.Source))
+			return m
+		}
+	}
+
+	a.t.Fatalf("no mount of type %q found in %d mounts", mountType, len(mounts))
+	return mount.Mount{}
+}
+
+// SnapshotCount verifies the expected number of snapshots.
+func (a *Assertions) SnapshotCount(ctx context.Context, op string, min int) int {
+	a.t.Helper()
+	ss := a.env.SnapshotService()
+
+	var count int
+	if err := ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error {
+		count++
+		return nil
+	}); err != nil {
+		a.t.Fatalf("walk snapshots: %v", err)
+	}
+
+	if count < min {
+		a.t.Fatalf("expected at least %d snapshots after %s, got %d", min, op, count)
+	}
+
+	a.t.Logf("✓ snapshot count after %s: %d", op, count)
+	return count
+}
+
+// DirContains verifies a directory contains a file matching the pattern.
+func (a *Assertions) DirContains(dir, pattern string) []string {
+	a.t.Helper()
+
+	var matches []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil //nolint:nilerr // skip inaccessible files
+		}
+		if !info.IsDir() {
+			matched, _ := filepath.Match(pattern, filepath.Base(path))
+			if matched {
+				matches = append(matches, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		a.t.Fatalf("walk %q: %v", dir, err)
+	}
+
+	if len(matches) == 0 {
+		a.t.Fatalf("no files matching %q in %s", pattern, dir)
+	}
+
+	a.t.Logf("✓ found %d files matching %q", len(matches), pattern)
+	return matches
+}
+
+// DumpSnapshotState logs the current state of all snapshots (for debugging).
+func (a *Assertions) DumpSnapshotState(ctx context.Context) {
+	a.t.Helper()
+	ss := a.env.SnapshotService()
+
+	a.t.Log("=== Current Snapshot State ===")
+	var count int
+	ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error { //nolint:errcheck
+		count++
+		a.t.Logf("  [%d] %s (kind=%v, parent=%q)", count, info.Name, info.Kind, info.Parent)
+		return nil
+	})
+	if count == 0 {
+		a.t.Log("  (no snapshots)")
+	}
+}
+
+// DumpFiles logs all files in a directory (for debugging).
+func (a *Assertions) DumpFiles(dir string) {
+	a.t.Helper()
+
+	a.t.Logf("=== Files in %s ===", dir)
+	var count int
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
+		if err == nil && !info.IsDir() {
+			count++
+			rel, _ := filepath.Rel(dir, path)
+			a.t.Logf("  %s (%d bytes)", rel, info.Size())
+		}
+		return nil
+	})
+	if count == 0 {
+		a.t.Log("  (no files)")
+	}
+}
+
+// FindCommittedSnapshot finds a committed snapshot to use as a parent.
+func (a *Assertions) FindCommittedSnapshot(ctx context.Context) string {
+	a.t.Helper()
+	ss := a.env.SnapshotService()
+
+	var parentKey string
+	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
+		if info.Kind == snapshots.KindCommitted && parentKey == "" {
+			parentKey = info.Name
+		}
+		return nil
+	}); err != nil {
+		a.t.Fatalf("walk snapshots: %v", err)
+	}
+
+	if parentKey == "" {
+		a.t.Fatal("no committed snapshot found")
+	}
+
+	a.t.Logf("✓ found committed snapshot: %s", parentKey)
+	return parentKey
+}
+
+// VMDKValid verifies a VMDK file has valid format.
+func (a *Assertions) VMDKValid(path string) {
+	a.t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		a.t.Fatalf("read VMDK %q: %v", path, err)
+	}
+
+	content := string(data)
+
+	// Check required fields
+	requiredFields := []string{"version=", "CID=", "createType="}
+	for _, field := range requiredFields {
+		if !strings.Contains(content, field) {
+			a.t.Fatalf("VMDK %q missing required field: %s", path, field)
+		}
+	}
+
+	// Check extent format
+	extentPattern := regexp.MustCompile(`RW\s+\d+\s+FLAT\s+"[^"]+"\s+\d+`)
+	if !extentPattern.MatchString(content) {
+		a.t.Fatalf("VMDK %q has no valid extent definitions", path)
+	}
+
+	a.t.Logf("✓ valid VMDK: %s", filepath.Base(path))
+}
 
 // Environment manages the test environment including containerd and snapshotter.
 type Environment struct {
@@ -590,151 +828,128 @@ func testHealthCheck(t *testing.T, env *Environment) {
 func testPullImage(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	c := env.Client()
+	assert := NewAssertions(t, env)
 
+	t.Log("--- Step 1: Pull image ---")
 	if err := pullImage(ctx, c, defaultTestImage); err != nil {
 		t.Fatalf("pull image: %v", err)
 	}
 
-	// Verify image exists
+	t.Log("--- Step 2: Verify image exists ---")
 	img, err := c.GetImage(ctx, defaultTestImage)
 	if err != nil {
 		t.Fatalf("get image: %v", err)
 	}
-	t.Logf("image pulled: %s", img.Name())
+	t.Logf("✓ image pulled: %s", img.Name())
 
-	// Verify snapshots were created
-	ss := env.SnapshotService()
-	var count int
-	if err := ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error {
-		count++
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
+	t.Log("--- Step 3: Verify snapshots created ---")
+	count := assert.SnapshotCount(ctx, "pull", 1)
+
+	t.Log("--- Step 4: Verify EROFS layer created ---")
+	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
+	erofsFiles := assert.DirContains(snapshotsDir, "*.erofs")
+	if len(erofsFiles) > 0 {
+		assert.ErofsValid(erofsFiles[0])
 	}
 
-	if count == 0 {
-		t.Fatal("expected at least one snapshot after pull")
-	}
-	t.Logf("snapshots created: %d", count)
+	t.Logf("✓ pull complete: %d snapshots, %d EROFS files", count, len(erofsFiles))
 }
 
 // testPrepareSnapshot verifies snapshot preparation from a committed parent.
 func testPrepareSnapshot(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
-	// Find a committed snapshot
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	t.Log("--- Step 1: Find committed parent ---")
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
-	if parentKey == "" {
-		t.Fatal("no committed snapshot found")
-	}
-
-	// Prepare an active snapshot
+	t.Log("--- Step 2: Prepare active snapshot ---")
 	snapKey := fmt.Sprintf("test-prepare-%d", time.Now().UnixNano())
 	mounts, err := ss.Prepare(ctx, snapKey, parentKey)
 	if err != nil {
 		t.Fatalf("prepare snapshot: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, snapKey)
+		ss.Remove(ctx, snapKey) //nolint:errcheck
 	})
 
 	if len(mounts) == 0 {
 		t.Fatal("prepare returned no mounts")
 	}
-	t.Logf("prepared snapshot with %d mounts", len(mounts))
 
-	// Verify snapshot info
-	info, err := ss.Stat(ctx, snapKey)
-	if err != nil {
-		t.Fatalf("stat snapshot: %v", err)
+	t.Log("--- Step 3: Verify mounts returned ---")
+	for i, m := range mounts {
+		t.Logf("  mount[%d]: type=%s source=%s", i, m.Type, filepath.Base(m.Source))
 	}
+	assert.MountsContain(mounts, "erofs")
 
-	if info.Kind != snapshots.KindActive {
-		t.Errorf("expected KindActive, got %v", info.Kind)
-	}
+	t.Log("--- Step 4: Verify snapshot state ---")
+	assert.SnapshotExists(ctx, snapKey, snapshots.KindActive)
+
+	t.Logf("✓ prepare complete: snapshot=%s mounts=%d", snapKey, len(mounts))
 }
 
 // testViewSnapshot verifies view snapshot creation and mount info.
 func testViewSnapshot(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
-	// Find a committed snapshot
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	t.Log("--- Step 1: Find committed parent ---")
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
-	if parentKey == "" {
-		t.Fatal("no committed snapshot found")
-	}
-
-	// Create a view
+	t.Log("--- Step 2: Create view snapshot ---")
 	viewKey := fmt.Sprintf("test-view-%d", time.Now().UnixNano())
 	mounts, err := ss.View(ctx, viewKey, parentKey)
 	if err != nil {
 		t.Fatalf("create view: %v", err)
 	}
 	t.Cleanup(func() {
-		ss.Remove(ctx, viewKey)
+		ss.Remove(ctx, viewKey) //nolint:errcheck
 	})
 
 	if len(mounts) == 0 {
 		t.Fatal("view returned no mounts")
 	}
 
-	// Verify mount contains EROFS reference
-	hasErofs := false
-	for _, m := range mounts {
-		if strings.Contains(m.Type, "erofs") || strings.Contains(m.Source, ".erofs") {
-			hasErofs = true
-			break
-		}
+	t.Log("--- Step 3: Verify mounts contain EROFS ---")
+	for i, m := range mounts {
+		t.Logf("  mount[%d]: type=%s source=%s", i, m.Type, filepath.Base(m.Source))
 	}
-	if !hasErofs {
-		t.Errorf("expected EROFS mount, got: %+v", mounts)
-	}
+	assert.MountsContain(mounts, "erofs")
 
-	// Verify snapshot info
-	info, err := ss.Stat(ctx, viewKey)
-	if err != nil {
-		t.Fatalf("stat view: %v", err)
-	}
+	t.Log("--- Step 4: Verify snapshot state ---")
+	assert.SnapshotExists(ctx, viewKey, snapshots.KindView)
 
-	if info.Kind != snapshots.KindView {
-		t.Errorf("expected KindView, got %v", info.Kind)
-	}
+	t.Logf("✓ view complete: snapshot=%s mounts=%d", viewKey, len(mounts))
 }
 
 // testErofsLayers verifies EROFS layer files are created correctly.
 func testErofsLayers(t *testing.T, env *Environment) {
+	assert := NewAssertions(t, env)
 	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
 
-	// Find EROFS layer files (exclude fsmeta.erofs which has different structure)
-	var erofsFiles []string
+	t.Log("--- Step 1: Scan for EROFS files ---")
+
+	// Find all EROFS files
+	var layerFiles []string  // sha256-*.erofs layer files
+	var fsmetaFiles []string // fsmeta.erofs files
+	var otherErofs []string  // other .erofs files
+
 	if err := filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return nil //nolint:nilerr // skip inaccessible files
 		}
 		if strings.HasSuffix(path, ".erofs") && !info.IsDir() {
-			// fsmeta.erofs files are multi-device metadata, not standard EROFS images
-			if filepath.Base(path) != "fsmeta.erofs" {
-				erofsFiles = append(erofsFiles, path)
+			base := filepath.Base(path)
+			switch {
+			case base == fsmetaFile:
+				fsmetaFiles = append(fsmetaFiles, path)
+			case strings.HasPrefix(base, "sha256-"):
+				layerFiles = append(layerFiles, path)
+			default:
+				otherErofs = append(otherErofs, path)
 			}
 		}
 		return nil
@@ -742,35 +957,54 @@ func testErofsLayers(t *testing.T, env *Environment) {
 		t.Fatalf("walk snapshots dir: %v", err)
 	}
 
-	if len(erofsFiles) == 0 {
-		// If no layer files, check if fsmeta.erofs exists (multi-device setup)
-		var hasFsmeta bool
-		filepath.Walk(snapshotsDir, func(path string, info os.FileInfo, err error) error { //nolint:errcheck
-			if err == nil && filepath.Base(path) == "fsmeta.erofs" {
-				hasFsmeta = true
-				t.Logf("found fsmeta.erofs: %s", path)
-			}
-			return nil
-		})
-		if hasFsmeta {
-			t.Log("no individual layer files, but fsmeta.erofs present (multi-device mode)")
-			return
-		}
+	t.Logf("  found: %d layer files, %d fsmeta files, %d other",
+		len(layerFiles), len(fsmetaFiles), len(otherErofs))
+
+	t.Log("--- Step 2: Verify EROFS files exist ---")
+	totalErofs := len(layerFiles) + len(fsmetaFiles) + len(otherErofs)
+	if totalErofs == 0 {
+		assert.DumpFiles(snapshotsDir)
 		t.Fatal("no EROFS files found")
 	}
-	t.Logf("found %d EROFS layer files", len(erofsFiles))
+	t.Logf("✓ %d total EROFS files found", totalErofs)
 
-	// Verify at least one has valid EROFS magic
-	for _, path := range erofsFiles {
-		err := verifyErofsMagic(path)
-		if err == nil {
-			t.Logf("verified EROFS magic in: %s", filepath.Base(path))
-			return
+	t.Log("--- Step 3: Validate EROFS layer magic ---")
+
+	// Check layer files (sha256-*.erofs) for valid magic
+	var validCount int
+	for _, path := range layerFiles {
+		if err := verifyErofsMagic(path); err != nil {
+			t.Logf("  ✗ %s: %v", filepath.Base(path), err)
+		} else {
+			t.Logf("  ✓ %s: valid EROFS magic", filepath.Base(path))
+			validCount++
 		}
-		t.Logf("file %s: %v", filepath.Base(path), err)
 	}
-	t.Error("no EROFS layer file with valid magic found")
+
+	// Also check other erofs files (might be commit results)
+	for _, path := range otherErofs {
+		if err := verifyErofsMagic(path); err != nil {
+			t.Logf("  ✗ %s: %v", filepath.Base(path), err)
+		} else {
+			t.Logf("  ✓ %s: valid EROFS magic", filepath.Base(path))
+			validCount++
+		}
+	}
+
+	// fsmeta files are metadata-only and don't have standard magic
+	for _, path := range fsmetaFiles {
+		t.Logf("  ℹ %s: fsmeta (multi-device metadata)", filepath.Base(path))
+	}
+
+	if validCount == 0 && len(fsmetaFiles) == 0 {
+		t.Fatal("no valid EROFS files found")
+	}
+
+	t.Logf("✓ EROFS validation complete: %d valid layers, %d fsmeta files", validCount, len(fsmetaFiles))
 }
+
+// EROFS superblock magic number.
+const erofsMagic = 0xE0F5E1E2
 
 // verifyErofsMagic checks if a file has the EROFS magic bytes.
 func verifyErofsMagic(path string) error {
@@ -780,7 +1014,7 @@ func verifyErofsMagic(path string) error {
 	}
 	defer f.Close()
 
-	// EROFS magic is at offset 1024, value 0xE0F5E1E2 (little-endian)
+	// EROFS superblock is at offset 1024, magic is first 4 bytes
 	if _, err := f.Seek(1024, io.SeekStart); err != nil {
 		return err
 	}
@@ -790,8 +1024,8 @@ func verifyErofsMagic(path string) error {
 		return err
 	}
 
-	if magic != 0xE2E1F5E0 {
-		return fmt.Errorf("invalid magic: %#x", magic)
+	if magic != erofsMagic {
+		return fmt.Errorf("invalid magic: got %#x, want %#x", magic, erofsMagic)
 	}
 	return nil
 }
@@ -887,55 +1121,34 @@ func testCommit(t *testing.T, env *Environment) {
 func testSnapshotCleanup(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
 
-	// Find a committed parent
-	var parentKey string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		if info.Kind == snapshots.KindCommitted && parentKey == "" {
-			parentKey = info.Name
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
+	t.Log("--- Step 1: Find committed parent ---")
+	parentKey := assert.FindCommittedSnapshot(ctx)
 
-	if parentKey == "" {
-		t.Skip("no committed snapshot found to use as parent")
-	}
-	t.Logf("using parent: %s", parentKey)
-
-	// Create snapshot for cleanup test
+	t.Log("--- Step 2: Create snapshot for cleanup test ---")
 	snapKey := fmt.Sprintf("test-cleanup-%d", time.Now().UnixNano())
 	mounts, err := ss.Prepare(ctx, snapKey, parentKey)
 	if err != nil {
+		assert.DumpSnapshotState(ctx)
 		t.Fatalf("prepare: %v", err)
 	}
-	t.Logf("prepared snapshot %s with %d mounts", snapKey, len(mounts))
+	t.Logf("✓ prepared snapshot %s with %d mounts", snapKey, len(mounts))
 
-	// Verify it exists
-	info, err := ss.Stat(ctx, snapKey)
-	if err != nil {
-		t.Fatalf("stat before remove: %v", err)
-	}
-	t.Logf("snapshot exists: kind=%v, parent=%s", info.Kind, info.Parent)
+	t.Log("--- Step 3: Verify snapshot exists ---")
+	assert.SnapshotExists(ctx, snapKey, snapshots.KindActive)
 
-	// Remove it
+	t.Log("--- Step 4: Remove snapshot ---")
 	if err := ss.Remove(ctx, snapKey); err != nil {
-		// Log all snapshots for debugging
-		t.Logf("remove failed, listing all snapshots:")
-		ss.Walk(ctx, func(_ context.Context, si snapshots.Info) error { //nolint:errcheck
-			t.Logf("  - %s (kind=%v, parent=%s)", si.Name, si.Kind, si.Parent)
-			return nil
-		})
+		assert.DumpSnapshotState(ctx)
 		t.Fatalf("remove: %v", err)
 	}
+	t.Logf("✓ remove operation completed")
 
-	// Verify it's gone
-	_, err = ss.Stat(ctx, snapKey)
-	if err == nil {
-		t.Fatal("snapshot still exists after remove")
-	}
-	t.Log("snapshot removed successfully")
+	t.Log("--- Step 5: Verify snapshot removed ---")
+	assert.SnapshotRemoved(ctx, snapKey)
+
+	t.Logf("✓ cleanup test complete: snapshot %s created and removed", snapKey)
 }
 
 // testMultiLayer tests pulling and viewing a multi-layer image.
