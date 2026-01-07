@@ -99,7 +99,7 @@
 //
 // Multiple goroutines may try to generate fsmeta for the same parent chain.
 // A lock file (O_EXCL) ensures only one wins; others exit silently.
-// See the lock file handling in [snapshotter.generateFsMeta].
+// See the lock file handling in [generateFsMeta].
 //
 // # Error Types
 //
