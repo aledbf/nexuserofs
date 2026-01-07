@@ -331,6 +331,8 @@ version = 2
   [proxy_plugins.nexus-erofs]
     type = "snapshot"
     address = "/run/nexus-erofs-snapshotter/snapshotter.sock"
+    # Enable parallel layer unpacking (requires containerd 2.0+)
+    capabilities = ["rebase"]
 
   [proxy_plugins.nexus-erofs-diff]
     type = "diff"
@@ -358,6 +360,7 @@ version = 2
 | Section | Purpose |
 |---------|---------|
 | `proxy_plugins` | Registers the external snapshotter and differ services |
+| `proxy_plugins.*.capabilities` | Enables parallel layer unpacking with `["rebase"]` |
 | `diff-service.default` | Prioritizes nexus-erofs-diff for layer application |
 | `transfer.v1.local.unpack_config` | Tells containerd which snapshotter/differ to use for unpacking |
 | `cri.v1.images.snapshotter` | (Optional) Makes CRI use nexus-erofs for Kubernetes workloads |
