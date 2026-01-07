@@ -68,6 +68,7 @@ import (
 // mountTypeBind is the mount type for bind mounts.
 const mountTypeBind = "bind"
 
+//nolint:cyclop // Integration test with necessary setup complexity
 func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
@@ -472,6 +473,8 @@ func TestErofsCommitWithoutHostMount(t *testing.T) {
 // TestErofsSnapshotterFsmetaSingleLayerView tests that when fsmeta merge
 // collapses multiple layers into a single mount, KindView returns the EROFS
 // mount directly without requiring mount manager resolution.
+//
+//nolint:cyclop // Integration test with necessary setup complexity
 func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")

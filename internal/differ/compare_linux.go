@@ -97,38 +97,77 @@ func (s *ErofsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 	})
 }
 
+// compressionTypeFromMediaType returns the compression type for a media type.
+func compressionTypeFromMediaType(mediaType string) (compression.Compression, error) {
+	switch mediaType {
+	case ocispec.MediaTypeImageLayer:
+		return compression.Uncompressed, nil
+	case ocispec.MediaTypeImageLayerGzip:
+		return compression.Gzip, nil
+	case ocispec.MediaTypeImageLayerZstd:
+		return compression.Zstd, nil
+	default:
+		return compression.Uncompressed, fmt.Errorf("unsupported diff media type: %v: %w", mediaType, errdefs.ErrNotImplemented)
+	}
+}
+
+// writeCompressedDiff writes a compressed diff and returns the uncompressed digest.
+func writeCompressedDiff(ctx context.Context, cw content.Writer, config diff.Config, compressionType compression.Compression, writeFn diffWriteFunc) (string, error) {
+	dgstr := digest.SHA256.Digester()
+	var compressed io.WriteCloser
+	var err error
+
+	if config.Compressor != nil {
+		compressed, err = config.Compressor(cw, config.MediaType)
+	} else {
+		compressed, err = compression.CompressStream(cw, compressionType)
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get compressed stream: %w", err)
+	}
+
+	err = writeFn(ctx, io.MultiWriter(compressed, dgstr.Hash()))
+	compressed.Close()
+	if err != nil {
+		return "", fmt.Errorf("failed to write compressed diff: %w", err)
+	}
+
+	return dgstr.Digest().String(), nil
+}
+
+// ensureUncompressedLabel ensures the uncompressed label is set on content info.
+func (s *ErofsDiff) ensureUncompressedLabel(ctx context.Context, info content.Info, uncompressedDigest string) error {
+	if _, ok := info.Labels[labels.LabelUncompressed]; ok {
+		return nil
+	}
+	info.Labels[labels.LabelUncompressed] = uncompressedDigest
+	_, err := s.store.Update(ctx, info, "labels."+labels.LabelUncompressed)
+	if err != nil {
+		return fmt.Errorf("error setting uncompressed label: %w", err)
+	}
+	return nil
+}
+
 // writeAndCommitDiff handles the common logic for writing a diff to the content store.
 // It manages compression, content writer lifecycle, and label updates.
 func (s *ErofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, writeFn diffWriteFunc) (ocispec.Descriptor, error) {
-	var compressionType compression.Compression
-	switch config.MediaType {
-	case ocispec.MediaTypeImageLayer:
-		compressionType = compression.Uncompressed
-	case ocispec.MediaTypeImageLayerGzip:
-		compressionType = compression.Gzip
-	case ocispec.MediaTypeImageLayerZstd:
-		compressionType = compression.Zstd
-	default:
-		return ocispec.Descriptor{}, fmt.Errorf("unsupported diff media type: %v: %w", config.MediaType, errdefs.ErrNotImplemented)
+	compressionType, err := compressionTypeFromMediaType(config.MediaType)
+	if err != nil {
+		return ocispec.Descriptor{}, err
 	}
 
-	var newReference bool
-	if config.Reference == "" {
-		newReference = true
+	newReference := config.Reference == ""
+	if newReference {
 		config.Reference = mountutils.UniqueRef()
 	}
 
 	cw, err := s.store.Writer(ctx,
 		content.WithRef(config.Reference),
-		content.WithDescriptor(ocispec.Descriptor{
-			MediaType: config.MediaType,
-		}))
+		content.WithDescriptor(ocispec.Descriptor{MediaType: config.MediaType}))
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("failed to open writer: %w", err)
 	}
 
-	// errOpen is set when an error occurs while the content writer has not been
-	// committed or closed yet to force a cleanup
 	var errOpen error
 	defer func() {
 		if errOpen != nil {
@@ -140,6 +179,7 @@ func (s *ErofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, 
 			}
 		}
 	}()
+
 	if !newReference {
 		if errOpen = cw.Truncate(0); errOpen != nil {
 			return ocispec.Descriptor{}, errOpen
@@ -147,29 +187,15 @@ func (s *ErofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, 
 	}
 
 	if compressionType != compression.Uncompressed {
-		dgstr := digest.SHA256.Digester()
-		var compressed io.WriteCloser
-		if config.Compressor != nil {
-			compressed, errOpen = config.Compressor(cw, config.MediaType)
-			if errOpen != nil {
-				return ocispec.Descriptor{}, fmt.Errorf("failed to get compressed stream: %w", errOpen)
-			}
-		} else {
-			compressed, errOpen = compression.CompressStream(cw, compressionType)
-			if errOpen != nil {
-				return ocispec.Descriptor{}, fmt.Errorf("failed to get compressed stream: %w", errOpen)
-			}
+		uncompressedDigest, werr := writeCompressedDiff(ctx, cw, config, compressionType, writeFn)
+		if werr != nil {
+			errOpen = werr
+			return ocispec.Descriptor{}, werr
 		}
-		errOpen = writeFn(ctx, io.MultiWriter(compressed, dgstr.Hash()))
-		compressed.Close()
-		if errOpen != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("failed to write compressed diff: %w", errOpen)
-		}
-
 		if config.Labels == nil {
 			config.Labels = map[string]string{}
 		}
-		config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
+		config.Labels[labels.LabelUncompressed] = uncompressedDigest
 	} else {
 		if errOpen = writeFn(ctx, cw); errOpen != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("failed to write diff: %w", errOpen)
@@ -196,12 +222,9 @@ func (s *ErofsDiff) writeAndCommitDiff(ctx context.Context, config diff.Config, 
 	if info.Labels == nil {
 		info.Labels = make(map[string]string)
 	}
-	// Set "containerd.io/uncompressed" label if digest already existed without label
-	if _, ok := info.Labels[labels.LabelUncompressed]; !ok {
-		info.Labels[labels.LabelUncompressed] = config.Labels[labels.LabelUncompressed]
-		if _, err := s.store.Update(ctx, info, "labels."+labels.LabelUncompressed); err != nil {
-			return ocispec.Descriptor{}, fmt.Errorf("error setting uncompressed label: %w", err)
-		}
+
+	if err := s.ensureUncompressedLabel(ctx, info, config.Labels[labels.LabelUncompressed]); err != nil {
+		return ocispec.Descriptor{}, err
 	}
 
 	return ocispec.Descriptor{

@@ -333,6 +333,7 @@ func (e *differTestEnv) compareAndVerify(differ *differ.ErofsDiff, lower, upper 
 	return desc
 }
 
+//nolint:cyclop // Integration test with necessary setup complexity
 func TestErofsDifferApply(t *testing.T) {
 	testutil.RequiresRoot(t)
 	ctx := namespaces.WithNamespace(t.Context(), "testsuite")
