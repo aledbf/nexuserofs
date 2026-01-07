@@ -228,7 +228,12 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 	for _, snapID := range ociOrder {
 		blob, err := s.findLayerBlob(snapID)
 		if err != nil {
-			log.G(ctx).WithError(err).WithField("snapshot", snapID).Debug("layer blob not found, skipping fsmeta")
+			log.G(ctx).WithError(err).WithFields(log.Fields{
+				"snapshot":       snapID,
+				"layerCount":     len(parentIDs),
+				"stage":          "collect_blobs",
+				"collectedSoFar": len(blobs),
+			}).Warn("fsmeta generation skipped: layer blob not found")
 			return
 		}
 		blobs = append(blobs, blob)
@@ -236,7 +241,10 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 
 	// Check block size compatibility for fsmeta merge
 	if !erofs.CanMergeFsmeta(blobs) {
-		log.G(ctx).Debug("skipping fsmeta generation: incompatible block sizes")
+		log.G(ctx).WithFields(log.Fields{
+			"layerCount": len(blobs),
+			"stage":      "check_compat",
+		}).Debug("fsmeta generation skipped: incompatible block sizes")
 		return
 	}
 
@@ -248,24 +256,41 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.G(ctx).WithError(err).Warnf("fsmeta generation failed: %s", string(out))
+		log.G(ctx).WithError(err).WithFields(log.Fields{
+			"layerCount": len(blobs),
+			"stage":      "mkfs_erofs",
+			"output":     string(out),
+		}).Warn("fsmeta generation failed: mkfs.erofs error")
 		return
 	}
 
 	// Fix VMDK to reference final fsmeta path instead of temp path.
 	// The VMDK is a simple text file with embedded paths.
 	if err := fixVmdkPaths(tmpVmdk, tmpMeta, mergedMeta); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to fix VMDK paths")
+		log.G(ctx).WithError(err).WithFields(log.Fields{
+			"layerCount": len(blobs),
+			"stage":      "fix_vmdk_paths",
+		}).Warn("fsmeta generation failed: cannot fix VMDK paths")
 		return
 	}
 
 	// Atomic rename: first fsmeta, then VMDK (VMDK references fsmeta)
 	if err := os.Rename(tmpMeta, mergedMeta); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to rename fsmeta file")
+		log.G(ctx).WithError(err).WithFields(log.Fields{
+			"layerCount": len(blobs),
+			"stage":      "rename_fsmeta",
+			"from":       tmpMeta,
+			"to":         mergedMeta,
+		}).Warn("fsmeta generation failed: cannot rename fsmeta file")
 		return
 	}
 	if err := os.Rename(tmpVmdk, vmdkFile); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to rename VMDK file")
+		log.G(ctx).WithError(err).WithFields(log.Fields{
+			"layerCount": len(blobs),
+			"stage":      "rename_vmdk",
+			"from":       tmpVmdk,
+			"to":         vmdkFile,
+		}).Warn("fsmeta generation failed: cannot rename VMDK file")
 		_ = os.Remove(mergedMeta) // Clean up the renamed fsmeta
 		return
 	}
