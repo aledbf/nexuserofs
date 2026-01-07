@@ -67,7 +67,7 @@
 //
 // # Mount Decision Tree
 //
-// The [snapshotter.mounts] function determines mount type based on:
+// The [mounts] function determines mount type based on:
 //
 //	Extract snapshot? → diffMounts() (bind mount to upper)
 //
