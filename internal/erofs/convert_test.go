@@ -67,7 +67,14 @@ func TestMountsToLayer(t *testing.T) {
 			mounts: []mount.Mount{
 				{Type: "erofs", Source: "/some/path/layer.erofs"},
 			},
-			expectError: true, // No .erofslayer marker
+			expectError: false, // EROFS mount types are trusted without marker
+		},
+		{
+			name: "format/erofs mount without marker",
+			mounts: []mount.Mount{
+				{Type: "format/erofs", Source: "/some/path/fsmeta.erofs"},
+			},
+			expectError: false, // EROFS mount types are trusted without marker
 		},
 		{
 			name: "overlay mount without marker",

@@ -247,10 +247,11 @@ func ConvertErofs(ctx context.Context, layerPath string, srcDir string, mkfsExtr
 //   - bind/erofs mounts: parent directory of mount source
 //   - overlay mounts: upperdir parent, or top lowerdir parent for read-only
 //
-// After extracting the path, it validates the directory by checking for the
-// ".erofslayer" marker file. This marker is created by the EROFS snapshotter
-// to indicate a directory is managed by EROFS.
-// If the marker is missing, ErrNotImplemented is returned, allowing the EROFS
+// Validation is performed to ensure the mounts are from the EROFS snapshotter:
+//   - If any mount has type "erofs" or "format/erofs", it's trusted as EROFS
+//   - Otherwise, the ".erofslayer" marker file must exist in the layer directory
+//
+// If validation fails, ErrNotImplemented is returned, allowing the EROFS
 // differ to fall back to other differs (e.g., the walking differ).
 func MountsToLayer(mounts []mount.Mount) (string, error) {
 	if len(mounts) == 0 {
@@ -262,11 +263,28 @@ func MountsToLayer(mounts []mount.Mount) (string, error) {
 		return "", err
 	}
 
-	// Validate the layer is prepared by the EROFS snapshotter
+	// Trust EROFS mount types - they come directly from our snapshotter
+	if hasErofsMountType(mounts) {
+		return layer, nil
+	}
+
+	// For other mount types (bind, overlay), require the marker file
 	if _, err := os.Stat(filepath.Join(layer, ErofsLayerMarker)); err != nil {
 		return "", fmt.Errorf("mount layer type must be erofs-layer: %w", errdefs.ErrNotImplemented)
 	}
 	return layer, nil
+}
+
+// hasErofsMountType returns true if any mount has an EROFS-related type.
+// This includes "erofs", "format/erofs", or any type ending in "/erofs".
+func hasErofsMountType(mounts []mount.Mount) bool {
+	for _, m := range mounts {
+		baseType := mountBaseType(m.Type)
+		if baseType == "erofs" {
+			return true
+		}
+	}
+	return false
 }
 
 // extractLayerPath determines the layer directory from mount specifications.
