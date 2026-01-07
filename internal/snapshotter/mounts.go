@@ -39,14 +39,25 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 		return mount.Mount{}, false
 	}
 
-	// Collect device options in newest-to-oldest order (same as ParentIDs order).
-	// This matches the layer order expected by EROFS multidev mode.
-	var deviceOptions []string
+	// Collect device blobs from ParentIDs (which are in newest-first order)
+	var blobs []string
 	for _, parentID := range snap.ParentIDs {
 		blob, err := s.findLayerBlob(parentID)
 		if err != nil {
 			return mount.Mount{}, false
 		}
+		blobs = append(blobs, blob)
+	}
+
+	// Reverse to oldest-first order to match the order used when generating fsmeta.
+	// mkfs.erofs rebuild mode expects layers in oldest-first order (OCI manifest order).
+	for i, j := 0, len(blobs)-1; i < j; i, j = i+1, j-1 {
+		blobs[i], blobs[j] = blobs[j], blobs[i]
+	}
+
+	// Build device= options in the correct order
+	var deviceOptions []string
+	for _, blob := range blobs {
 		deviceOptions = append(deviceOptions, "device="+blob)
 	}
 

@@ -296,6 +296,74 @@ func TestMountFsMetaReturnsFormatErofs(t *testing.T) {
 	}
 }
 
+func TestMountFsMetaDeviceOrder(t *testing.T) {
+	// This test verifies that mountFsMeta returns device= options in oldest-first order,
+	// matching the order used when generating fsmeta with mkfs.erofs.
+
+	root := t.TempDir()
+	s := &snapshotter{root: root}
+
+	// Create 3 parent snapshot directories with layer blobs
+	// ParentIDs order: [parent3, parent2, parent1] (newest to oldest)
+	// Expected device order: [parent1, parent2, parent3] (oldest to newest)
+	parentIDs := []string{"parent3", "parent2", "parent1"}
+	var expectedOrder []string
+
+	for _, pid := range []string{"parent1", "parent2", "parent3"} { // oldest to newest
+		snapshotDir := filepath.Join(root, "snapshots", pid)
+		if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// Use digest-based layer names (64 hex chars required)
+		layerPath := filepath.Join(snapshotDir, "sha256-"+pid+pid+pid+pid+pid+pid+pid+pid+".erofs")
+		if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		expectedOrder = append(expectedOrder, "device="+layerPath)
+	}
+
+	// Create fsmeta and vmdk in the newest parent (parent3)
+	newestDir := filepath.Join(root, "snapshots", "parent3")
+	vmdkPath := filepath.Join(newestDir, "merged.vmdk")
+	fsmetaPath := filepath.Join(newestDir, "fsmeta.erofs")
+	for _, path := range []string{vmdkPath, fsmetaPath} {
+		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a snapshot with 3 parents (newest first in ParentIDs)
+	snap := storage.Snapshot{
+		ID:        "child",
+		ParentIDs: parentIDs, // [parent3, parent2, parent1] newest to oldest
+	}
+
+	mount, ok := s.mountFsMeta(snap)
+	if !ok {
+		t.Fatal("mountFsMeta should return true when fsmeta/vmdk exist")
+	}
+
+	// Extract device= options from mount.Options
+	var deviceOpts []string
+	for _, opt := range mount.Options {
+		if len(opt) > 7 && opt[:7] == "device=" {
+			deviceOpts = append(deviceOpts, opt)
+		}
+	}
+
+	// Verify we have 3 device options
+	if len(deviceOpts) != 3 {
+		t.Fatalf("expected 3 device options, got %d: %v", len(deviceOpts), deviceOpts)
+	}
+
+	// Verify order is oldest-first (parent1, parent2, parent3)
+	for i, expected := range expectedOrder {
+		if deviceOpts[i] != expected {
+			t.Errorf("device option %d: got %q, want %q", i, deviceOpts[i], expected)
+		}
+	}
+}
+
 func TestSnapshotterPaths(t *testing.T) {
 	root := "/var/lib/containerd/io.containerd.snapshotter.v1.erofs"
 	s := &snapshotter{root: root}
