@@ -1906,7 +1906,11 @@ test_full_cleanup_no_leaks() {
         snapshots=$(ctr_cmd snapshots --snapshotter nexus-erofs ls 2>/dev/null | grep -v "^KEY" | awk '{print $1}' || true)
 
         local current_count
-        current_count=$(echo "$snapshots" | grep -c . 2>/dev/null || echo 0)
+        current_count=$(echo "$snapshots" | grep -c . 2>/dev/null || true)
+        # Ensure we have a valid number (grep -c might return empty or error)
+        if [ -z "$current_count" ] || ! [[ "$current_count" =~ ^[0-9]+$ ]]; then
+            current_count=0
+        fi
 
         # No more snapshots
         if [ "$current_count" -eq 0 ] || [ -z "$snapshots" ]; then
