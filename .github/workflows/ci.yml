@@ -124,6 +124,7 @@ jobs:
           mkdir -p bin
           go build -trimpath -ldflags "-s -w" -o bin/nexus-erofs-snapshotter ./cmd/nexus-erofs-snapshotter
           go build -trimpath -ldflags "-s -w" -o bin/integration-commit ./cmd/integration-commit
+          go test -c -o bin/integration.test ./test/integration/...
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -146,7 +147,7 @@ jobs:
 
       - name: Prepare binaries
         run: |
-          chmod +x bin/nexus-erofs-snapshotter bin/integration-commit
+          chmod +x bin/nexus-erofs-snapshotter bin/integration-commit bin/integration.test
           ls -la bin/
 
       - name: Pull integration test image
@@ -154,10 +155,11 @@ jobs:
           docker pull ghcr.io/${{ github.repository }}/integration:latest
           docker tag ghcr.io/${{ github.repository }}/integration:latest nexus-erofs-integration:local
 
-      - name: Run integration tests
-        run: |
-          sudo modprobe erofs
+      - name: Load EROFS kernel module
+        run: sudo modprobe erofs
 
+      - name: Run bash integration tests
+        run: |
           docker run --privileged --rm \
             -v /dev:/dev \
             -v ${{ github.workspace }}:/workspace \
@@ -170,6 +172,23 @@ jobs:
             --tmpfs /var/lib/nexus-erofs-snapshotter:exec \
             --entrypoint /workspace/scripts/integration-test.sh \
             nexus-erofs-integration:local
+
+      - name: Run Go integration tests
+        run: |
+          docker run --privileged --rm \
+            -v /dev:/dev \
+            -v ${{ github.workspace }}:/workspace \
+            -v ${{ github.workspace }}/bin/nexus-erofs-snapshotter:/usr/local/bin/nexus-erofs-snapshotter \
+            -v ${{ github.workspace }}/bin/integration-commit:/usr/local/bin/integration-commit \
+            -v ${{ github.workspace }}/bin/integration.test:/usr/local/bin/integration.test \
+            -w /workspace \
+            --tmpfs /tmp:exec \
+            --tmpfs /run:exec \
+            --tmpfs /var/lib/containerd-test:exec \
+            --tmpfs /var/lib/nexus-erofs-snapshotter:exec \
+            --entrypoint /usr/local/bin/integration.test \
+            nexus-erofs-integration:local \
+            -test.v -test.timeout 10m -test.root
 
       - name: Upload logs on failure
         if: failure()

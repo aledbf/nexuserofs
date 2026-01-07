@@ -7,6 +7,7 @@ on:
       - Dockerfile.integration
       - scripts/build-erofs-utils.sh
       - scripts/integration-test.sh
+      - test/integration/**
   workflow_dispatch:
 
 permissions:
