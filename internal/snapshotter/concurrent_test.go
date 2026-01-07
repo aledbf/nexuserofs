@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -288,11 +289,11 @@ func TestFsmetaAtomicRename(t *testing.T) {
 	}
 
 	// Atomic rename (same order as generateFsMeta)
-	if err := os.Rename(tmpVmdk, vmdkPath); err != nil {
-		t.Fatalf("rename vmdk: %v", err)
-	}
 	if err := os.Rename(tmpMeta, fsmetaPath); err != nil {
 		t.Fatalf("rename fsmeta: %v", err)
+	}
+	if err := os.Rename(tmpVmdk, vmdkPath); err != nil {
+		t.Fatalf("rename vmdk: %v", err)
 	}
 
 	// Verify final files exist
@@ -309,5 +310,54 @@ func TestFsmetaAtomicRename(t *testing.T) {
 	}
 	if _, err := os.Stat(tmpVmdk); !os.IsNotExist(err) {
 		t.Error("temp vmdk should not exist after rename")
+	}
+}
+
+// TestFixVmdkPaths verifies the VMDK path replacement function.
+func TestFixVmdkPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	vmdkFile := filepath.Join(tmpDir, "test.vmdk")
+
+	// Sample VMDK content with temp path
+	vmdkContent := `# Disk DescriptorFile
+version=1
+CID=91702505
+parentCID=ffffffff
+createType="twoGbMaxExtentFlat"
+# Extent description
+RW 232 FLAT "/var/lib/snapshots/11/fsmeta.erofs.tmp" 0
+RW 15944 FLAT "/var/lib/snapshots/7/layer1.erofs" 0
+# The Disk Data Base
+#DDB
+ddb.virtualHWVersion = "4"
+`
+
+	if err := os.WriteFile(vmdkFile, []byte(vmdkContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fix the path
+	oldPath := "/var/lib/snapshots/11/fsmeta.erofs.tmp"
+	newPath := "/var/lib/snapshots/11/fsmeta.erofs"
+	if err := fixVmdkPaths(vmdkFile, oldPath, newPath); err != nil {
+		t.Fatalf("fixVmdkPaths: %v", err)
+	}
+
+	// Read back and verify
+	content, err := os.ReadFile(vmdkFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contentStr := string(content)
+	if strings.Contains(contentStr, ".tmp") {
+		t.Error("VMDK should not contain .tmp after fix")
+	}
+	if !strings.Contains(contentStr, "fsmeta.erofs") {
+		t.Error("VMDK should contain final fsmeta.erofs path")
+	}
+	// Verify other paths are unchanged
+	if !strings.Contains(contentStr, "layer1.erofs") {
+		t.Error("VMDK should still contain layer1.erofs path")
 	}
 }

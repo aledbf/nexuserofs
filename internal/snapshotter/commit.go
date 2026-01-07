@@ -250,11 +250,9 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 		return
 	}
 
-	// Generate fsmeta and VMDK to temp files first.
-	// Note: mkfs.erofs embeds paths in VMDK, so we generate to final paths
-	// but will only have complete files after atomic rename.
-	// For VMDK, we generate to temp then rename; the embedded paths are
-	// correct because they reference the final fsmeta path.
+	// Generate fsmeta and VMDK to temp files.
+	// mkfs.erofs embeds the fsmeta path in the VMDK, so we generate to temp
+	// and then fix up the VMDK paths before the final rename.
 	args := append([]string{"--quiet", "--vmdk-desc=" + tmpVmdk, tmpMeta}, blobs...)
 
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
@@ -264,14 +262,21 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 		return
 	}
 
-	// Atomic rename: first VMDK, then fsmeta (fsmeta presence indicates completion)
-	if err := os.Rename(tmpVmdk, vmdkFile); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to rename VMDK file")
+	// Fix VMDK to reference final fsmeta path instead of temp path.
+	// The VMDK is a simple text file with embedded paths.
+	if err := fixVmdkPaths(tmpVmdk, tmpMeta, mergedMeta); err != nil {
+		log.G(ctx).WithError(err).Warn("failed to fix VMDK paths")
 		return
 	}
+
+	// Atomic rename: first fsmeta, then VMDK (VMDK references fsmeta)
 	if err := os.Rename(tmpMeta, mergedMeta); err != nil {
 		log.G(ctx).WithError(err).Warn("failed to rename fsmeta file")
-		_ = os.Remove(vmdkFile) // Clean up the renamed VMDK
+		return
+	}
+	if err := os.Rename(tmpVmdk, vmdkFile); err != nil {
+		log.G(ctx).WithError(err).Warn("failed to rename VMDK file")
+		_ = os.Remove(mergedMeta) // Clean up the renamed fsmeta
 		return
 	}
 
@@ -287,6 +292,24 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 		"duration": time.Since(t1),
 		"layers":   len(blobs),
 	}).Debug("fsmeta and VMDK generated")
+}
+
+// fixVmdkPaths replaces oldPath with newPath in a VMDK descriptor file.
+// VMDK is a simple text format where paths appear in FLAT extent lines.
+func fixVmdkPaths(vmdkFile, oldPath, newPath string) error {
+	content, err := os.ReadFile(vmdkFile)
+	if err != nil {
+		return fmt.Errorf("read vmdk: %w", err)
+	}
+
+	// Simple string replacement - the VMDK format uses quoted paths
+	fixed := strings.ReplaceAll(string(content), oldPath, newPath)
+
+	if err := os.WriteFile(vmdkFile, []byte(fixed), 0644); err != nil {
+		return fmt.Errorf("write vmdk: %w", err)
+	}
+
+	return nil
 }
 
 // writeLayerManifest writes layer digests to a manifest file in VMDK/OCI order.
