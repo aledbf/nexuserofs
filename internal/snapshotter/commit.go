@@ -25,24 +25,32 @@ import (
 //   - Directory mode (regular snapshots): VM handles overlay, no host mount needed.
 //     The upper directory is directly at fs/.
 //
-// For block mode, the ext4 is already mounted by Prepare() for extract snapshots,
-// so we just return the path without additional mounting.
+// For block mode, the ext4 must already be mounted by Prepare() for extract snapshots.
+// If the block mount isn't available, falls back to overlay mode.
 func (s *snapshotter) getCommitUpperDir(id string) string {
 	rwLayer := s.writablePath(id)
 
 	// Check if block layer exists (rwlayer.img)
 	if _, err := os.Stat(rwLayer); err != nil {
-		// Directory mode: use overlay upper directly
+		// No block layer - use overlay upper directly
 		return s.upperPath(id)
 	}
 
-	// Block mode: upper directory is inside the mounted ext4
+	// Block mode: check if ext4 upper directory is accessible
 	upperDir := s.blockUpperPath(id)
-	if _, err := os.Stat(upperDir); os.IsNotExist(err) {
-		// Upper directory doesn't exist - use mount root (no changes case)
-		return s.blockRwMountPath(id)
+	if _, err := os.Stat(upperDir); err == nil {
+		return upperDir
 	}
-	return upperDir
+
+	// rw/upper/ doesn't exist - check if rw/ mount point has content
+	rwMount := s.blockRwMountPath(id)
+	if entries, err := os.ReadDir(rwMount); err == nil && len(entries) > 0 {
+		// Mounted but no upper/ subdirectory (empty overlay case)
+		return rwMount
+	}
+
+	// Block mount not available - fall back to overlay mode
+	return s.upperPath(id)
 }
 
 // commitBlock handles the conversion of a writable layer to EROFS.
