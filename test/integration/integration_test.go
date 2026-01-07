@@ -375,13 +375,26 @@ type Environment struct {
 	// Client
 	client *client.Client
 
+	// Configuration options
+	capabilities []string // Snapshotter capabilities (e.g., ["rebase"])
+
 	// Mutex for concurrent access
 	mu sync.Mutex
 }
 
+// EnvOption configures an Environment.
+type EnvOption func(*Environment)
+
+// WithCapabilities sets the snapshotter capabilities in containerd config.
+func WithCapabilities(caps ...string) EnvOption {
+	return func(e *Environment) {
+		e.capabilities = caps
+	}
+}
+
 // NewEnvironment creates a new test environment.
 // It initializes directories but does not start services.
-func NewEnvironment(t *testing.T) *Environment {
+func NewEnvironment(t *testing.T, opts ...EnvOption) *Environment {
 	t.Helper()
 	testutil.RequiresRoot(t)
 
@@ -395,6 +408,11 @@ func NewEnvironment(t *testing.T) *Environment {
 		logDir:            filepath.Join(rootDir, "logs"),
 		containerdSocket:  filepath.Join(rootDir, "containerd.sock"),
 		snapshotterSocket: filepath.Join(rootDir, "snapshotter.sock"),
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(env)
 	}
 
 	// Create directories
@@ -506,6 +524,17 @@ func (e *Environment) LogDir() string {
 func (e *Environment) writeContainerdConfig() error {
 	configPath := filepath.Join(e.rootDir, "containerd.toml")
 
+	// Build capabilities line if set
+	var capabilitiesLine string
+	if len(e.capabilities) > 0 {
+		// Format as TOML array: capabilities = ["rebase"]
+		quoted := make([]string, len(e.capabilities))
+		for i, c := range e.capabilities {
+			quoted[i] = fmt.Sprintf("%q", c)
+		}
+		capabilitiesLine = fmt.Sprintf("    capabilities = [%s]\n", strings.Join(quoted, ", "))
+	}
+
 	config := fmt.Sprintf(`version = 2
 root = %q
 
@@ -516,7 +545,7 @@ root = %q
   [proxy_plugins.nexus-erofs]
     type = "snapshot"
     address = %q
-
+%s
   [proxy_plugins.nexus-erofs-diff]
     type = "diff"
     address = %q
@@ -532,7 +561,7 @@ root = %q
 
 [plugins."io.containerd.cri.v1.images"]
   snapshotter = "nexus-erofs"
-`, e.containerdRoot, e.containerdSocket, e.snapshotterSocket, e.snapshotterSocket)
+`, e.containerdRoot, e.containerdSocket, e.snapshotterSocket, capabilitiesLine, e.snapshotterSocket)
 
 	return os.WriteFile(configPath, []byte(config), 0644)
 }
@@ -1533,4 +1562,159 @@ func findVMDKWithMostLayers(snapshotsDir string) (string, int) {
 	})
 
 	return vmdkPath, maxLayers
+}
+
+// TestParallelUnpackWithRebase tests parallel layer unpacking with rebase capability.
+// This verifies that when containerd uses parallel unpacking (enabled by the "rebase"
+// capability), the layer order in the VMDK is correct.
+//
+// Background: Parallel unpacking creates layers without parents initially, then
+// "rebases" them to the correct parent chain during commit. This requires the
+// snapshotter's gRPC service to properly pass the Parent field in CommitSnapshotRequest.
+// See: https://github.com/containerd/containerd/issues/8881
+func TestParallelUnpackWithRebase(t *testing.T) {
+	testutil.RequiresRoot(t)
+
+	// Check prerequisites
+	if err := checkPrerequisites(); err != nil {
+		t.Skipf("prerequisites not met: %v", err)
+	}
+
+	// Create environment with rebase capability enabled
+	env := NewEnvironment(t, WithCapabilities("rebase"))
+	t.Cleanup(func() {
+		env.Stop()
+		env.dumpLogs("snapshotter")
+		env.dumpLogs("containerd")
+	})
+
+	// Start services
+	if err := env.Start(); err != nil {
+		t.Fatalf("start environment: %v", err)
+	}
+
+	ctx := env.Context()
+	c := env.Client()
+	ss := env.SnapshotService()
+	assert := NewAssertions(t, env)
+
+	t.Log("=== Testing Parallel Unpack with Rebase Capability ===")
+
+	// Step 1: Pull multi-layer image (parallel unpacking will be used)
+	t.Log("--- Step 1: Pull multi-layer image with parallel unpacking ---")
+	if err := pullImage(ctx, c, multiLayerImage); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	t.Log("image pulled successfully")
+
+	// Step 2: Find the top committed snapshot
+	t.Log("--- Step 2: Find top committed snapshot ---")
+	topSnap := assert.FindCommittedSnapshot(ctx)
+
+	// Step 3: Create a view to trigger VMDK generation
+	t.Log("--- Step 3: Create view snapshot ---")
+	viewKey := fmt.Sprintf("test-rebase-view-%d", time.Now().UnixNano())
+	mounts, err := ss.View(ctx, viewKey, topSnap)
+	if err != nil {
+		t.Fatalf("create view: %v", err)
+	}
+	t.Cleanup(func() {
+		ss.Remove(ctx, viewKey) //nolint:errcheck
+	})
+	t.Logf("view created with %d mounts", len(mounts))
+
+	// Step 4: Wait for VMDK generation (async)
+	t.Log("--- Step 4: Wait for VMDK generation ---")
+	snapshotsDir := filepath.Join(env.SnapshotterRoot(), "snapshots")
+	var vmdkPath string
+	var layerCount int
+	err = waitFor(func() bool {
+		vmdkPath, layerCount = findVMDKWithMostLayers(snapshotsDir)
+		return layerCount >= 2
+	}, 30*time.Second, "waiting for multi-layer VMDK")
+
+	if err != nil {
+		vmdkPath, layerCount = findVMDKWithMostLayers(snapshotsDir)
+		assert.DumpFiles(snapshotsDir)
+		t.Fatalf("no multi-layer VMDK generated (found: %s with %d layers)", vmdkPath, layerCount)
+	}
+	t.Logf("VMDK generated: %s (%d layers)", vmdkPath, layerCount)
+
+	// Step 5: Verify layer order matches manifest
+	t.Log("--- Step 5: Verify layer order ---")
+
+	// Parse VMDK layers
+	vmdkLayers, err := parseVMDKLayers(vmdkPath)
+	if err != nil {
+		t.Fatalf("parse VMDK: %v", err)
+	}
+	t.Logf("VMDK contains %d extents", len(vmdkLayers))
+
+	// Verify fsmeta is first
+	if len(vmdkLayers) > 0 && !strings.Contains(vmdkLayers[0], "fsmeta.erofs") {
+		t.Errorf("first extent should be fsmeta.erofs, got: %s", filepath.Base(vmdkLayers[0]))
+	}
+
+	// Read manifest file
+	manifestPath := filepath.Join(filepath.Dir(vmdkPath), "layers.manifest")
+	manifestDigests, err := readLayersManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	t.Logf("manifest contains %d layer digests", len(manifestDigests))
+
+	// Extract VMDK digests (skip fsmeta)
+	var vmdkDigests []string
+	for _, layer := range vmdkLayers {
+		if d := extractDigest(layer); d != "" {
+			vmdkDigests = append(vmdkDigests, d)
+		}
+	}
+
+	// Verify counts match
+	if len(vmdkDigests) != len(manifestDigests) {
+		t.Errorf("layer count mismatch: VMDK=%d, manifest=%d", len(vmdkDigests), len(manifestDigests))
+		t.Logf("VMDK digests: %v", truncateDigests(vmdkDigests))
+		t.Logf("manifest digests: %v", truncateDigests(manifestDigests))
+	}
+
+	// Verify order matches (oldest-first in both)
+	orderCorrect := true
+	for i := 0; i < len(vmdkDigests) && i < len(manifestDigests); i++ {
+		if vmdkDigests[i] != manifestDigests[i] {
+			t.Errorf("layer order mismatch at position %d:", i)
+			t.Errorf("  VMDK:     %s", vmdkDigests[i][:min(12, len(vmdkDigests[i]))])
+			t.Errorf("  manifest: %s", manifestDigests[i][:min(12, len(manifestDigests[i]))])
+			orderCorrect = false
+		}
+	}
+
+	if orderCorrect && len(vmdkDigests) == len(manifestDigests) && len(vmdkDigests) >= 2 {
+		t.Log("SUCCESS: Layer order is correct with parallel unpacking + rebase")
+	} else if len(vmdkDigests) < 2 {
+		t.Errorf("FAIL: Expected at least 2 layers, got %d (rebase may not be working)", len(vmdkDigests))
+	}
+
+	// Log layer details for debugging
+	t.Log("--- Layer Details ---")
+	for i, d := range vmdkDigests {
+		if i < len(manifestDigests) && d == manifestDigests[i] {
+			t.Logf("  [%d] OK: %s...", i, d[:min(12, len(d))])
+		} else {
+			t.Logf("  [%d] MISMATCH: vmdk=%s...", i, d[:min(12, len(d))])
+		}
+	}
+}
+
+// truncateDigests returns digests truncated to first 12 chars for logging.
+func truncateDigests(digests []string) []string {
+	result := make([]string, len(digests))
+	for i, d := range digests {
+		if len(d) > 12 {
+			result[i] = d[:12] + "..."
+		} else {
+			result[i] = d
+		}
+	}
+	return result
 }
