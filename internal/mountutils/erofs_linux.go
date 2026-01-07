@@ -19,9 +19,12 @@
 package mountutils
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/aledbf/nexus-erofs/internal/loop"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -169,7 +172,16 @@ func HasActiveSnapshotMounts(mounts []mount.Mount) bool {
 
 // MountExt4 mounts an ext4 filesystem image to the target directory using a loop device.
 // Returns a cleanup function that unmounts and detaches the loop device.
+//
+// This function checks if the file is in use (e.g., by a running VM) before mounting.
+// If the file is in use, it returns an error indicating the container must be stopped first.
 func MountExt4(source, target string) (cleanup func() error, err error) {
+	// Check if the file is in use by trying to get an exclusive lock.
+	// If a VM is using it via virtio-blk, we won't be able to get the lock.
+	if err := checkFileNotInUse(source); err != nil {
+		return nopCleanup, err
+	}
+
 	// Set up loop device for the ext4 image
 	loopDev, err := loop.Setup(source, loop.Config{ReadOnly: false})
 	if err != nil {
@@ -194,6 +206,30 @@ func MountExt4(source, target string) (cleanup func() error, err error) {
 		}
 		return nil
 	}, nil
+}
+
+// checkFileNotInUse verifies that the file is not being used by another process
+// (e.g., a running VM). It attempts to get an exclusive lock on the file.
+// If the lock cannot be acquired, the file is in use and commit cannot proceed.
+func checkFileNotInUse(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	// Try to get an exclusive lock (non-blocking)
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("container is still running: stop the container before committing (ext4 %s is in use)", path)
+		}
+		return fmt.Errorf("failed to check if file is in use: %w", err)
+	}
+
+	// Release the lock immediately - we just wanted to check
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return nil
 }
 
 func nopCleanup() error { return nil }
