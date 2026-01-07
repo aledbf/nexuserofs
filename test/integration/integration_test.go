@@ -1403,13 +1403,14 @@ func unmountExt4(target string) error {
 	return nil
 }
 
-// testFullCleanup verifies all resources are cleaned up properly.
+// testFullCleanup verifies all resources are cleaned up properly after image deletion.
+// This test checks that containerd properly cascades cleanup to snapshots.
 func testFullCleanup(t *testing.T, env *Environment) {
 	ctx := env.Context()
 	c := env.Client()
 	ss := env.SnapshotService()
 
-	// Remove all images
+	// Delete all images - this should trigger automatic snapshot cleanup
 	imgService := c.ImageService()
 	imgs, err := imgService.List(ctx)
 	if err != nil {
@@ -1422,34 +1423,23 @@ func testFullCleanup(t *testing.T, env *Environment) {
 		}
 	}
 
-	// Remove all snapshots (in reverse order to handle dependencies)
-	var keys []string
-	if err := ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error {
-		keys = append(keys, info.Name)
-		return nil
-	}); err != nil {
-		t.Fatalf("walk snapshots: %v", err)
-	}
-
-	for i := len(keys) - 1; i >= 0; i-- {
-		if err := ss.Remove(ctx, keys[i]); err != nil {
-			t.Logf("remove snapshot %s: %v", keys[i], err)
-		}
-	}
-
-	// Wait for cleanup by polling
-	var remaining int
+	// Wait for containerd to clean up snapshots automatically
+	var remaining []snapshots.Info
 	_ = waitFor(func() bool {
-		remaining = 0
-		ss.Walk(ctx, func(_ context.Context, _ snapshots.Info) error { //nolint:errcheck
-			remaining++
+		remaining = nil
+		ss.Walk(ctx, func(_ context.Context, info snapshots.Info) error { //nolint:errcheck
+			remaining = append(remaining, info)
 			return nil
 		})
-		return remaining == 0
+		return len(remaining) == 0
 	}, 5*time.Second, "snapshots not cleaned up")
 
-	if remaining > 0 {
-		t.Errorf("%d snapshots still registered after cleanup", remaining)
+	// Report any leaked snapshots (don't try to remove them - that would mask bugs)
+	if len(remaining) > 0 {
+		t.Errorf("%d snapshots still registered after image deletion:", len(remaining))
+		for _, info := range remaining {
+			t.Logf("  leaked snapshot: %s (parent: %q, kind: %v)", info.Name, info.Parent, info.Kind)
+		}
 	}
 
 	// Check for leaked files
