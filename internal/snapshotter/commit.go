@@ -28,9 +28,6 @@ type commitSource struct {
 
 	// cleanup is called after conversion to release resources (e.g., unmount).
 	cleanup func()
-
-	// mode describes the source for logging/debugging.
-	mode string
 }
 
 // resolveCommitSource determines where to read upper directory contents from.
@@ -60,15 +57,10 @@ func (s *snapshotter) resolveCommitSource(ctx context.Context, id string) (*comm
 
 // commitSourceFromOverlay returns the commit source for directory mode.
 // This is the simple case where the overlay upper is directly accessible.
-func (s *snapshotter) commitSourceFromOverlay(ctx context.Context, id string) (*commitSource, error) {
-	upperDir := s.upperPath(id)
-
-	log.G(ctx).WithField("upper", upperDir).Debug("using overlay directory mode for commit")
-
+func (s *snapshotter) commitSourceFromOverlay(_ context.Context, id string) (*commitSource, error) {
 	return &commitSource{
-		upperDir: upperDir,
+		upperDir: s.upperPath(id),
 		cleanup:  func() {}, // No cleanup needed
-		mode:     "overlay",
 	}, nil
 }
 
@@ -123,7 +115,6 @@ func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer str
 	return &commitSource{
 		upperDir: upperDir,
 		cleanup:  cleanup,
-		mode:     "block",
 	}, nil
 }
 
@@ -159,12 +150,6 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 	}
 	defer source.cleanup()
 
-	log.G(ctx).WithFields(log.Fields{
-		"id":    id,
-		"mode":  source.mode,
-		"upper": source.upperDir,
-	}).Debug("converting upper directory to EROFS")
-
 	if err := convertDirToErofs(ctx, layerBlob, source.upperDir); err != nil {
 		return &CommitConversionError{
 			SnapshotID: id,
@@ -179,8 +164,9 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 // generateFsMeta creates a merged fsmeta.erofs and VMDK descriptor for VM runtimes.
 // The VMDK allows QEMU to present all EROFS layers as a single concatenated block device.
 //
-// WHY ASYNC: fsmeta generation is expensive (mkfs.erofs subprocess) but not required
-// for basic snapshot operations. Running async keeps Prepare/View fast.
+// CALLER CONTRACT: parentIDs must be in snapshot chain order (newest-first).
+// This is the order returned by containerd's snapshot storage. We convert to
+// OCI manifest order (oldest-first) internally for mkfs.erofs.
 //
 // WHY PLACEHOLDER: Multiple goroutines may try to generate fsmeta for the same parent
 // chain. The placeholder file (O_EXCL) ensures only one wins. Others exit silently -
@@ -189,26 +175,15 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 // WHY SILENT FAILURE: If fsmeta generation fails, callers fall back to individual
 // layer mounts. This is slightly slower but functionally correct. The placeholder
 // is removed on failure, allowing retry on next access.
-//
-// LAYER ORDERING:
-// The parentIDs parameter uses snapshot chain order (newest-first).
-// We convert to OCI manifest order (oldest-first) for mkfs.erofs.
-// See layer_order.go for the LayerSequence type that makes this explicit.
-func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequence) {
-	if parentIDs.IsEmpty() {
-		return
-	}
-
-	// Validate ordering assumption - this function expects newest-first order
-	if !parentIDs.IsNewestFirst {
-		log.G(ctx).Warn("generateFsMeta received oldest-first sequence, expected newest-first")
+func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
+	if len(parentIDs) == 0 {
 		return
 	}
 
 	t1 := time.Now()
 
-	// Use the newest snapshot's directory for output files (IDs[0] is newest when IsNewestFirst=true)
-	newestID := parentIDs.IDs[0]
+	// parentIDs[0] is the newest snapshot in chain order
+	newestID := parentIDs[0]
 	mergedMeta := s.fsMetaPath(newestID)
 	vmdkFile := s.vmdkPath(newestID)
 
@@ -229,13 +204,11 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequenc
 		}
 	}()
 
-	// Convert to oldest-first order for mkfs.erofs
-	ociOrder := parentIDs.Reverse()
-
-	log.G(ctx).WithField("layers", ociOrder.Len()).Debug("collecting layer blobs for fsmeta generation")
+	// Convert to oldest-first order for mkfs.erofs (OCI manifest order)
+	ociOrder := reverseStrings(parentIDs)
 
 	// Collect layer blob paths in OCI order (oldest-first)
-	for _, snapID := range ociOrder.IDs {
+	for _, snapID := range ociOrder {
 		blob, err := s.findLayerBlob(snapID)
 		if err != nil {
 			log.G(ctx).WithError(err).WithField("snapshot", snapID).Debug("layer blob not found, skipping fsmeta")
@@ -255,7 +228,6 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequenc
 	// Generate fsmeta and VMDK in one mkfs.erofs call
 	// IMPORTANT: Use final paths because mkfs.erofs embeds them in the VMDK
 	args := append([]string{"--quiet", "--vmdk-desc=" + vmdkFile, mergedMeta}, blobs...)
-	log.G(ctx).Debugf("running mkfs.erofs with args: %v", args)
 
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	out, err := cmd.CombinedOutput()
@@ -274,7 +246,7 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs LayerSequenc
 	log.G(ctx).WithFields(log.Fields{
 		"duration": time.Since(t1),
 		"layers":   len(blobs),
-	}).Info("fsmeta and VMDK generated successfully")
+	}).Debug("fsmeta and VMDK generated")
 }
 
 // writeLayerManifest writes layer digests to a manifest file in VMDK/OCI order.

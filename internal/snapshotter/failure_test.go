@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -73,44 +74,24 @@ func TestErrorChainDepth(t *testing.T) {
 
 	// Error message should include context from all levels
 	msg := level3.Error()
-	if !errContains(msg, "snap-abc") {
+	if !strings.Contains(msg, "snap-abc") {
 		t.Error("error message should contain snapshot ID")
 	}
 }
 
-// TestEmptyLayerSequenceOperations verifies operations on empty sequences are safe.
-func TestEmptyLayerSequenceOperations(t *testing.T) {
-	empty := LayerSequence{}
-
-	// All operations should be safe on empty sequence
-	if !empty.IsEmpty() {
-		t.Error("empty sequence should be empty")
+// TestReverseStringsEmpty verifies reverseStrings handles empty/nil slices.
+func TestReverseStringsEmpty(t *testing.T) {
+	// Empty slice
+	result := reverseStrings([]string{})
+	if result != nil {
+		t.Errorf("expected nil for empty slice, got %v", result)
 	}
 
-	if empty.Len() != 0 {
-		t.Errorf("empty sequence Len() = %d, want 0", empty.Len())
+	// Nil slice
+	result = reverseStrings(nil)
+	if result != nil {
+		t.Errorf("expected nil for nil slice, got %v", result)
 	}
-
-	reversed := empty.Reverse()
-	if !reversed.IsEmpty() {
-		t.Error("reversed empty sequence should be empty")
-	}
-}
-
-// TestNilSliceLayerSequence verifies nil slice handling.
-func TestNilSliceLayerSequence(t *testing.T) {
-	seq := NewNewestFirst(nil)
-
-	if !seq.IsEmpty() {
-		t.Error("nil slice should create empty sequence")
-	}
-
-	if seq.Len() != 0 {
-		t.Error("nil slice sequence should have length 0")
-	}
-
-	// Should not panic on operations
-	_ = seq.Reverse()
 }
 
 // TestBlockMountErrorNilCause verifies nil cause is handled.

@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
@@ -78,6 +79,9 @@ type snapshotter struct {
 	// mountTracker tracks ext4 block mount states for extract snapshots.
 	// This provides explicit state tracking instead of filesystem checks.
 	mountTracker *MountTracker
+
+	// bgWg tracks background operations (fsmeta generation) for clean shutdown.
+	bgWg sync.WaitGroup
 }
 
 // extractLabel is the label key used to mark snapshots for layer extraction.
@@ -147,9 +151,11 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 }
 
 // Close releases all resources held by the snapshotter.
+// It waits for any background operations (fsmeta generation) to complete.
 func (s *snapshotter) Close() error {
+	s.bgWg.Wait() // Wait for background operations to complete
 	s.cleanupBlockMounts()
-	s.mountTracker.Clear() // Clear mount state tracking
+	s.mountTracker.Clear()
 	return s.ms.Close()
 }
 

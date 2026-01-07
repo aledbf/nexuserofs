@@ -2,6 +2,7 @@ package snapshotter
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -17,10 +18,10 @@ func TestLayerBlobNotFoundError(t *testing.T) {
 	if msg == "" {
 		t.Error("error message should not be empty")
 	}
-	if !errContains(msg, "snap-123") {
+	if !strings.Contains(msg, "snap-123") {
 		t.Errorf("error message should contain snapshot ID: %s", msg)
 	}
-	if !errContains(msg, "sha256-*.erofs") {
+	if !strings.Contains(msg, "sha256-*.erofs") {
 		t.Errorf("error message should contain searched patterns: %s", msg)
 	}
 
@@ -50,10 +51,10 @@ func TestBlockMountError(t *testing.T) {
 
 	// Test error message
 	msg := err.Error()
-	if !errContains(msg, "rwlayer.img") {
+	if !strings.Contains(msg, "rwlayer.img") {
 		t.Errorf("error message should contain source: %s", msg)
 	}
-	if !errContains(msg, "rw") {
+	if !strings.Contains(msg, "/rw") {
 		t.Errorf("error message should contain target: %s", msg)
 	}
 
@@ -78,10 +79,10 @@ func TestCommitConversionError(t *testing.T) {
 
 	// Test error message
 	msg := err.Error()
-	if !errContains(msg, "snap-789") {
+	if !strings.Contains(msg, "snap-789") {
 		t.Errorf("error message should contain snapshot ID: %s", msg)
 	}
-	if !errContains(msg, "fs") {
+	if !strings.Contains(msg, "/fs") {
 		t.Errorf("error message should contain upper dir: %s", msg)
 	}
 
@@ -115,14 +116,4 @@ func TestErrorWrapping(t *testing.T) {
 	if !errors.As(commitErr, &blockTarget) {
 		t.Error("should find BlockMountError in error chain")
 	}
-}
-
-// errContains checks if s contains substr (simple helper to avoid strings import)
-func errContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
