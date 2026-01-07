@@ -1688,7 +1688,7 @@ func compareLayerOrder(t *testing.T, vmdkDigests, manifestDigests []string) erro
 		return fmt.Errorf("expected at least 2 layers, got %d (rebase may not be working)", len(vmdkDigests))
 	}
 
-	for i := 0; i < len(vmdkDigests); i++ {
+	for i := range vmdkDigests {
 		if vmdkDigests[i] != manifestDigests[i] {
 			t.Logf("layer order mismatch at position %d: VMDK=%s, manifest=%s",
 				i, vmdkDigests[i][:min(12, len(vmdkDigests[i]))],
