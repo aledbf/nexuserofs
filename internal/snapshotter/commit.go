@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,7 +173,9 @@ func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id stri
 // SILENT FAILURE: If fsmeta generation fails, callers fall back to individual
 // layer mounts. This is slightly slower but functionally correct.
 func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
-	if len(parentIDs) == 0 {
+	// Fsmeta merges metadata from multiple EROFS layers into a single file.
+	// With only one layer, there's nothing to merge - skip generation.
+	if len(parentIDs) < 2 {
 		return
 	}
 
@@ -225,7 +228,7 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 	// Collect layer blob paths in OCI order (oldest-first)
 	var blobs []string
 	for _, snapID := range ociOrder {
-		blob, err := s.findLayerBlob(snapID)
+		blob, err := s.findLayerBlob(ctx, snapID)
 		if err != nil {
 			log.G(ctx).WithError(err).WithFields(log.Fields{
 				"snapshot":       snapID,
@@ -296,10 +299,38 @@ func (s *snapshotter) generateFsMeta(ctx context.Context, parentIDs []string) {
 
 	success = true
 
-	// Write layer manifest for external verification
-	manifestFile := s.manifestPath(newestID)
-	if err := s.writeLayerManifest(manifestFile, blobs); err != nil {
-		log.G(ctx).WithError(err).Warn("failed to write layer manifest (non-fatal)")
+	// Collect layer digests for labels and manifest
+	var layerDigests []digest.Digest
+	for _, blob := range blobs {
+		if d := erofs.DigestFromLayerBlobPath(blob); d != "" {
+			layerDigests = append(layerDigests, d)
+		}
+	}
+
+	// Write layers.manifest file for external verification tools
+	// Format: one digest per line in OCI/VMDK order (oldest-first)
+	if len(layerDigests) > 0 {
+		manifestPath := s.layersManifestPath(newestID)
+		var manifestLines []string
+		for _, d := range layerDigests {
+			manifestLines = append(manifestLines, d.String())
+		}
+		manifestContent := strings.Join(manifestLines, "\n") + "\n"
+		if err := os.WriteFile(manifestPath, []byte(manifestContent), 0644); err != nil {
+			log.G(ctx).WithError(err).Warn("failed to write layers.manifest (non-fatal)")
+		}
+	}
+
+	// Update snapshot labels to mark fsmeta as ready
+	fsmetaLabels := map[string]string{
+		LabelFsmetaReady:  LabelValueTrue,
+		LabelFsmetaLayers: strconv.Itoa(len(blobs)),
+	}
+	if len(layerDigests) > 0 {
+		fsmetaLabels[LabelLayerOrder] = EncodeLayerOrder(layerDigests)
+	}
+	if err := s.updateSnapshotLabelsByID(ctx, newestID, fsmetaLabels); err != nil {
+		log.G(ctx).WithError(err).Warn("failed to update fsmeta labels (non-fatal)")
 	}
 
 	log.G(ctx).WithFields(log.Fields{
@@ -324,32 +355,6 @@ func fixVmdkPaths(vmdkFile, oldPath, newPath string) error {
 	}
 
 	return nil
-}
-
-// writeLayerManifest writes layer digests to a manifest file in VMDK/OCI order.
-// Format: one digest per line (sha256:hex...), oldest/base layer first.
-// This is the authoritative source for VMDK layer order verification.
-func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) error {
-	var digests []digest.Digest
-	for _, blob := range blobs {
-		d := erofs.DigestFromLayerBlobPath(blob)
-		if d != "" {
-			digests = append(digests, d)
-		}
-		// Skip non-digest-based blobs (e.g., snapshot-xxx.erofs fallback)
-	}
-
-	if len(digests) == 0 {
-		return nil // No digests to write
-	}
-
-	var lines []string
-	for _, d := range digests {
-		lines = append(lines, d.String())
-	}
-
-	content := strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(manifestFile, []byte(content), 0644)
 }
 
 // Commit finalizes an active snapshot, converting it to EROFS format.
@@ -386,7 +391,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	}).Debug("starting commit")
 
 	// Find existing layer blob or create via fallback
-	layerBlob, err = s.findLayerBlob(id)
+	layerBlob, err = s.findLayerBlob(ctx, id)
 	if err != nil {
 		// Layer doesn't exist - EROFS differ hasn't processed this layer.
 		// Fall back to converting the upper directory ourselves.
@@ -404,6 +409,18 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			log.G(ctx).WithError(err).Warn("failed to set immutable flag (non-fatal)")
 		}
 	}
+
+	// Build commit labels with layer metadata
+	commitLabels := map[string]string{
+		LabelLayerBlobPath: layerBlob,
+	}
+	if layerDigest := erofs.DigestFromLayerBlobPath(layerBlob); layerDigest != "" {
+		commitLabels[LabelLayerDigest] = layerDigest.String()
+	}
+	if s.setImmutable {
+		commitLabels[LabelImmutable] = LabelValueTrue
+	}
+	opts = append(opts, snapshots.WithLabels(commitLabels))
 
 	// Commit to metadata in a write transaction
 	err = s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {

@@ -31,26 +31,28 @@ import (
 )
 
 // MountAll mounts all provided mounts to the target directory.
-// It extends the standard mount.All by adding support for EROFS multi-device mounts.
+// It extends the standard mount.All by adding support for EROFS mounts with loop devices.
 //
-// EROFS multi-device mounts (fsmeta with device= options) require special handling:
-// - The containerd mount manager cannot handle device= options directly
-// - Loop devices must be set up for both the main fsmeta and each blob
+// EROFS mounts with loop option require special handling:
+// - Loop devices must be set up for the EROFS file(s)
+// - Multi-device mounts (fsmeta with device= options) need loop devices for all blobs
 // - The mount options must be rewritten to use loop device paths
 //
 // Returns a cleanup function that must be called to release resources (loop devices).
 // The cleanup function is always non-nil, even on error.
 func MountAll(mounts []mount.Mount, target string) (cleanup func() error, err error) {
-	// Find EROFS mounts with device= options
+	// Find EROFS mounts that need loop device setup
 	erofsIdx := -1
+	hasMultiDevice := false
 	for i, m := range mounts {
-		if TypeSuffix(m.Type) == fsTypeErofs && hasDeviceOption(m.Options) {
+		if TypeSuffix(m.Type) == fsTypeErofs && hasLoopOption(m.Options) {
 			erofsIdx = i
+			hasMultiDevice = hasDeviceOption(m.Options)
 			break
 		}
 	}
 
-	// No EROFS multi-device mount - use standard mount.All
+	// No EROFS mount with loop option - use standard mount.All
 	if erofsIdx == -1 {
 		if err := mount.All(mounts, target); err != nil {
 			return nopCleanup, err
@@ -60,8 +62,15 @@ func MountAll(mounts []mount.Mount, target string) (cleanup func() error, err er
 		}, nil
 	}
 
-	// Handle EROFS multi-device mount
+	// Handle EROFS mount with loop device
 	erofsMount := mounts[erofsIdx]
+
+	// Simple single-device EROFS mount (no device= options)
+	if !hasMultiDevice {
+		return mountSingleErofs(erofsMount, target)
+	}
+
+	// Handle EROFS multi-device mount
 
 	// Separate device= options from other options
 	var devices []string
@@ -69,7 +78,7 @@ func MountAll(mounts []mount.Mount, target string) (cleanup func() error, err er
 	for _, opt := range erofsMount.Options {
 		if strings.HasPrefix(opt, "device=") {
 			devices = append(devices, strings.TrimPrefix(opt, "device="))
-		} else if opt != "loop" {
+		} else if opt != optLoop {
 			otherOpts = append(otherOpts, opt)
 		}
 	}
@@ -189,3 +198,40 @@ func checkFileNotInUse(path string) error {
 }
 
 func nopCleanup() error { return nil }
+
+// mountSingleErofs mounts a single EROFS file using a loop device.
+// Returns a cleanup function that unmounts and detaches the loop device.
+func mountSingleErofs(m mount.Mount, target string) (func() error, error) {
+	// Set up loop device
+	loopDev, err := loop.Setup(m.Source, loop.Config{ReadOnly: true})
+	if err != nil {
+		return nopCleanup, fmt.Errorf("failed to setup loop device for %s: %w", m.Source, err)
+	}
+
+	// Filter out loop option since we're handling it
+	var mountOpts []string
+	for _, opt := range m.Options {
+		if opt != optLoop {
+			mountOpts = append(mountOpts, opt)
+		}
+	}
+
+	// Mount the loop device as EROFS
+	cmd := exec.Command("mount", "-t", "erofs", "-o", strings.Join(mountOpts, ","), loopDev.Path, target)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = loopDev.Detach()
+		return nopCleanup, fmt.Errorf("failed to mount EROFS: %w: %s", err, out)
+	}
+
+	return func() error {
+		// Unmount first
+		if out, err := exec.Command("umount", target).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to unmount %s: %w: %s", target, err, out)
+		}
+		// Then detach loop device
+		if err := loopDev.Detach(); err != nil {
+			return fmt.Errorf("failed to detach loop device: %w", err)
+		}
+		return nil
+	}, nil
+}

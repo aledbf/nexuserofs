@@ -1,11 +1,12 @@
 package snapshotter
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/aledbf/nexus-erofs/internal/erofs"
+	"github.com/containerd/containerd/v2/core/snapshots"
 )
 
 const (
@@ -40,8 +41,8 @@ const (
 	// vmdkFilename is the filename for the VMDK descriptor.
 	vmdkFilename = "merged.vmdk"
 
-	// manifestFilename is the filename for the layer manifest (stores digests in VMDK order).
-	manifestFilename = "layers.manifest"
+	// layersManifestFilename is the filename for the layer order manifest.
+	layersManifestFilename = "layers.manifest"
 )
 
 // upperPath returns the path to the overlay upper directory for a snapshot.
@@ -64,33 +65,52 @@ func (s *snapshotter) blockUpperPath(id string) string {
 	return filepath.Join(s.blockRwMountPath(id), upperDirName)
 }
 
-// findLayerBlob finds the EROFS layer blob in a snapshot directory.
-// Layer blobs are named using their content digest (sha256-xxx.erofs) or
-// the snapshot ID for walking differ fallback (snapshot-xxx.erofs).
-// Returns the path if found, or LayerBlobNotFoundError if no blob exists.
-func (s *snapshotter) findLayerBlob(id string) (string, error) {
-	dir := filepath.Join(s.root, snapshotsDirName, id)
-	patterns := []string{erofs.LayerBlobPattern, fallbackLayerPrefix + "*.erofs"}
-
-	// First try digest-based naming (primary path via EROFS differ)
-	matches, err := filepath.Glob(filepath.Join(dir, erofs.LayerBlobPattern))
+// findLayerBlob finds the EROFS layer blob for a snapshot.
+// First checks the LabelLayerBlobPath label, then falls back to globbing
+// for *.erofs files in the snapshot directory.
+func (s *snapshotter) findLayerBlob(ctx context.Context, id string) (string, error) {
+	info, err := s.getSnapshotInfoByID(ctx, id)
 	if err != nil {
-		return "", fmt.Errorf("glob layer blob: %w", err)
-	}
-	if len(matches) > 0 {
-		return matches[0], nil
+		// Info lookup failed, but we can still try the glob fallback
+		info = snapshots.Info{}
 	}
 
-	// Try fallback naming (walking differ creates these)
-	fallbackPath := filepath.Join(dir, fallbackLayerPrefix+id+".erofs")
-	if _, err := os.Stat(fallbackPath); err == nil {
-		return fallbackPath, nil
+	return s.findLayerBlobFromInfo(id, info)
+}
+
+// findLayerBlobFromInfo finds the EROFS layer blob using the snapshot's labels.
+// Falls back to globbing for *.erofs files in the snapshot directory if the
+// label isn't set (for compatibility with EROFS differ which creates blobs
+// directly without setting labels).
+func (s *snapshotter) findLayerBlobFromInfo(id string, info snapshots.Info) (string, error) {
+	snapshotDir := filepath.Join(s.root, snapshotsDirName, id)
+	var searched []string
+
+	// First check the label (preferred)
+	if blobPath := info.Labels[LabelLayerBlobPath]; blobPath != "" {
+		if _, err := os.Stat(blobPath); err == nil {
+			return blobPath, nil
+		}
+		searched = append(searched, blobPath+" (from label, file missing)")
 	}
+
+	// Fallback: glob for any *.erofs file in the snapshot directory
+	// This handles cases where the EROFS differ created the blob directly
+	pattern := filepath.Join(snapshotDir, "*.erofs")
+	matches, _ := filepath.Glob(pattern)
+	for _, match := range matches {
+		// Skip fsmeta files
+		if filepath.Base(match) == fsmetaFilename {
+			continue
+		}
+		return match, nil
+	}
+	searched = append(searched, pattern+" (glob found nothing)")
 
 	return "", &LayerBlobNotFoundError{
 		SnapshotID: id,
-		Dir:        dir,
-		Searched:   patterns,
+		Dir:        snapshotDir,
+		Searched:   searched,
 	}
 }
 
@@ -110,9 +130,9 @@ func (s *snapshotter) vmdkPath(id string) string {
 	return filepath.Join(s.root, snapshotsDirName, id, vmdkFilename)
 }
 
-// manifestPath returns the path to the layer manifest file.
-func (s *snapshotter) manifestPath(id string) string {
-	return filepath.Join(s.root, snapshotsDirName, id, manifestFilename)
+// layersManifestPath returns the path to the layers.manifest file.
+func (s *snapshotter) layersManifestPath(id string) string {
+	return filepath.Join(s.root, snapshotsDirName, id, layersManifestFilename)
 }
 
 // viewLowerPath returns the path to the lower directory for View snapshots.
@@ -131,8 +151,8 @@ func (s *snapshotter) snapshotsDir() string {
 }
 
 // lowerPath returns the EROFS layer blob path for a snapshot, validating it exists.
-func (s *snapshotter) lowerPath(id string) (string, error) {
-	layerBlob, err := s.findLayerBlob(id)
+func (s *snapshotter) lowerPath(ctx context.Context, id string) (string, error) {
+	layerBlob, err := s.findLayerBlob(ctx, id)
 	if err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}

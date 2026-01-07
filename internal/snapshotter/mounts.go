@@ -1,6 +1,7 @@
 package snapshotter
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 	"github.com/aledbf/nexus-erofs/internal/erofs"
 )
 
-// mountFsMeta returns a mount for merged fsmeta.erofs if VMDK exists.
+// mountFsMeta returns a mount for merged fsmeta.erofs if the LabelFsmetaReady label is set.
 // When VMDK exists, the consumer can use a single virtio-blk device for all layers.
 //
 // The mount type is "format/erofs" (not plain "erofs") to signal that this is a
@@ -21,23 +22,22 @@ import (
 // than the cryptic EINVAL that occurs when it tries to mount EROFS with file paths
 // in device= options. VM runtimes (like qemubox) and the custom mountutils.MountAll()
 // understand this type and handle it correctly.
-func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
-	if len(snap.ParentIDs) == 0 {
+func (s *snapshotter) mountFsMeta(ctx context.Context, snap storage.Snapshot) (mount.Mount, bool) {
+	// Fsmeta is only generated for 2+ layer chains
+	if len(snap.ParentIDs) < 2 {
 		return mount.Mount{}, false
 	}
 
 	// fsmeta is stored under the immediate parent's snapshot ID
 	parentID := snap.ParentIDs[0]
-	vmdkFile := s.vmdkPath(parentID)
-	fsmetaFile := s.fsMetaPath(parentID)
 
-	// Both files must exist for VMDK mode
-	if _, err := os.Stat(vmdkFile); err != nil {
+	// Check if fsmeta is ready via labels
+	parentInfo, err := s.getSnapshotInfoByID(ctx, parentID)
+	if err != nil || parentInfo.Labels[LabelFsmetaReady] != LabelValueTrue {
 		return mount.Mount{}, false
 	}
-	if _, err := os.Stat(fsmetaFile); err != nil {
-		return mount.Mount{}, false
-	}
+
+	fsmetaFile := s.fsMetaPath(parentID)
 
 	// Collect device= options by iterating backwards through ParentIDs (newest-first input).
 	// This produces oldest-first order matching containerd's approach and the order
@@ -45,7 +45,7 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 	// See: https://github.com/containerd/containerd/pull/12374
 	var deviceOptions []string
 	for i := len(snap.ParentIDs) - 1; i >= 0; i-- {
-		blob, err := s.findLayerBlob(snap.ParentIDs[i])
+		blob, err := s.findLayerBlob(ctx, snap.ParentIDs[i])
 		if err != nil {
 			return mount.Mount{}, false
 		}
@@ -63,7 +63,7 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 //
 // DECISION TREE:
 //
-//	Is extract snapshot (extractLabel=true)?
+//	Is extract snapshot (LabelExtract=true)?
 //	├─ YES → diffMounts(): bind mount to rw/upper/ for EROFS differ
 //	└─ NO  → Check snapshot kind:
 //	         ├─ KindView  → viewMountsForKind(): read-only layer access
@@ -72,7 +72,7 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot) (mount.Mount, bool) {
 // Mounts use raw file paths for VM consumers. The "loop" option signals
 // that host mounting requires loop device setup. VM runtimes convert
 // these paths to virtio-blk devices directly.
-func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
+func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	// Extract snapshots use bind mount to upper directory.
 	// The EROFS differ writes directly to this directory, which is inside
 	// the mounted rwlayer.img ext4 filesystem.
@@ -82,12 +82,12 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 
 	// View snapshots: read-only access to committed layers
 	if snap.Kind == snapshots.KindView {
-		return s.viewMountsForKind(snap)
+		return s.viewMountsForKind(ctx, snap)
 	}
 
 	// Active snapshots: read-only layers + writable ext4
 	if snap.Kind == snapshots.KindActive {
-		return s.activeMountsForKind(snap)
+		return s.activeMountsForKind(ctx, snap)
 	}
 
 	return nil, fmt.Errorf("unsupported snapshot kind: %v", snap.Kind)
@@ -102,7 +102,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 //	N parents → viewMounts():
 //	            ├─ fsmeta exists? → single fsmeta mount (type: format/erofs)
 //	            └─ no fsmeta     → N individual EROFS mounts
-func (s *snapshotter) viewMountsForKind(snap storage.Snapshot) ([]mount.Mount, error) {
+func (s *snapshotter) viewMountsForKind(ctx context.Context, snap storage.Snapshot) ([]mount.Mount, error) {
 	// 0 parents: bind mount to empty directory.
 	// This is rare but valid for empty base images.
 	if len(snap.ParentIDs) == 0 {
@@ -123,7 +123,7 @@ func (s *snapshotter) viewMountsForKind(snap storage.Snapshot) ([]mount.Mount, e
 	// No fsmeta needed for single layer. Linux overlay requires 2+ lowerdirs
 	// or an upperdir, so we return the EROFS directly.
 	if len(snap.ParentIDs) == 1 {
-		layerBlob, err := s.lowerPath(snap.ParentIDs[0])
+		layerBlob, err := s.lowerPath(ctx, snap.ParentIDs[0])
 		if err != nil {
 			return nil, fmt.Errorf("get layer blob for view parent %s: %w", snap.ParentIDs[0], err)
 		}
@@ -137,7 +137,7 @@ func (s *snapshotter) viewMountsForKind(snap storage.Snapshot) ([]mount.Mount, e
 	}
 
 	// N parents: try fsmeta for efficiency, fall back to individual mounts
-	return s.viewMounts(snap)
+	return s.viewMounts(ctx, snap)
 }
 
 // activeMountsForKind returns mounts for KindActive snapshots.
@@ -150,20 +150,20 @@ func (s *snapshotter) viewMountsForKind(snap storage.Snapshot) ([]mount.Mount, e
 //	            └─ no fsmeta     → N EROFS mounts + ext4 (N+1 mounts)
 //
 // The VM runtime combines these into an overlay filesystem inside the guest.
-func (s *snapshotter) activeMountsForKind(snap storage.Snapshot) ([]mount.Mount, error) {
+func (s *snapshotter) activeMountsForKind(ctx context.Context, snap storage.Snapshot) ([]mount.Mount, error) {
 	// 0 parents: only the writable ext4 layer
 	if len(snap.ParentIDs) == 0 {
 		return s.singleLayerMounts(snap)
 	}
 	// N parents: read-only EROFS layers + writable ext4
-	return s.activeMounts(snap)
+	return s.activeMounts(ctx, snap)
 }
 
 // isExtractSnapshot returns true if the snapshot is marked for layer extraction.
-// This is determined by the extractLabel in the snapshot metadata, which is set
+// This is determined by the LabelExtract in the snapshot metadata, which is set
 // atomically during snapshot creation for TOCTOU safety.
 func isExtractSnapshot(info snapshots.Info) bool {
-	return info.Labels[extractLabel] == "true"
+	return info.Labels[LabelExtract] == LabelValueTrue
 }
 
 // singleLayerMounts returns mounts for an Active snapshot with no parent layers.
@@ -208,10 +208,10 @@ func (s *snapshotter) diffMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 // getErofsLayerPaths returns the EROFS layer blob paths for a snapshot.
 // This returns file paths without mounting - the consumer
 // transforms these to virtio-blk disks or uses mount manager to mount them.
-func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error) {
+func (s *snapshotter) getErofsLayerPaths(ctx context.Context, snap storage.Snapshot) ([]string, error) {
 	var paths []string
 	for _, parentID := range snap.ParentIDs {
-		layerBlob, err := s.lowerPath(parentID)
+		layerBlob, err := s.lowerPath(ctx, parentID)
 		if err != nil {
 			return nil, err
 		}
@@ -229,14 +229,14 @@ func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error
 // Return formats:
 //   - With fsmeta: [{type: format/erofs, source: fsmeta.erofs, options: [device=layer1, ...]}]
 //   - Without:     [{type: erofs, source: layer1.erofs}, {type: erofs, source: layer2.erofs}, ...]
-func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+func (s *snapshotter) viewMounts(ctx context.Context, snap storage.Snapshot) ([]mount.Mount, error) {
 	// Try fsmeta first (single mount with VMDK) - preferred for efficiency
-	if m, ok := s.mountFsMeta(snap); ok {
+	if m, ok := s.mountFsMeta(ctx, snap); ok {
 		return []mount.Mount{m}, nil
 	}
 
 	// Fallback: individual EROFS mounts (fsmeta not ready or generation failed)
-	layerPaths, err := s.getErofsLayerPaths(snap)
+	layerPaths, err := s.getErofsLayerPaths(ctx, snap)
 	if err != nil {
 		return nil, err
 	}
@@ -266,15 +266,15 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 //
 // The ext4 mount is always last, making it easy for consumers to identify
 // the writable layer.
-func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+func (s *snapshotter) activeMounts(ctx context.Context, snap storage.Snapshot) ([]mount.Mount, error) {
 	var mounts []mount.Mount
 
 	// Read-only layers: prefer fsmeta for fewer virtio-blk devices
-	if m, ok := s.mountFsMeta(snap); ok {
+	if m, ok := s.mountFsMeta(ctx, snap); ok {
 		mounts = append(mounts, m)
 	} else {
 		// Fallback: individual EROFS mounts
-		layerPaths, err := s.getErofsLayerPaths(snap)
+		layerPaths, err := s.getErofsLayerPaths(ctx, snap)
 		if err != nil {
 			return nil, err
 		}

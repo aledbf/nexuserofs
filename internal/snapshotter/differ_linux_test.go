@@ -456,7 +456,7 @@ func TestErofsDifferApply(t *testing.T) {
 	}
 
 	// Verify the EROFS layer file was created
-	layerPath, err := snap.findLayerBlob(id)
+	layerPath, err := snap.findLayerBlob(ctx, id)
 	if err != nil {
 		t.Fatalf("Failed to find layer blob: %v", err)
 	}

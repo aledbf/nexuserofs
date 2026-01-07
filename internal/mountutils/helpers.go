@@ -31,6 +31,9 @@ import (
 // fsTypeErofs is the filesystem type string for EROFS mounts.
 const fsTypeErofs = "erofs"
 
+// optLoop is the mount option for loop device mounts.
+const optLoop = "loop"
+
 // NeedsMountManager returns true if any mount requires the mount manager to resolve.
 // This includes mounts with template syntax (e.g., "{{ mount 0 }}"), formatted mounts
 // (format/, mkfs/, mkdir/), and mounts with loop options (which require loop device setup).
@@ -52,10 +55,10 @@ func NeedsMountManager(mounts []mount.Mount) bool {
 	return false
 }
 
-// hasLoopOption returns true if the options contain "loop".
+// hasLoopOption returns true if the options contain the loop mount option.
 func hasLoopOption(options []string) bool {
 	for _, opt := range options {
-		if opt == "loop" {
+		if opt == optLoop {
 			return true
 		}
 	}

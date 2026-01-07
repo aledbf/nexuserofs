@@ -459,7 +459,7 @@ func TestErofsCommitWithoutHostMount(t *testing.T) {
 	}
 
 	// Verify the layer blob was created
-	layerBlob, err := snap.findLayerBlob(vmID)
+	layerBlob, err := snap.findLayerBlob(ctx, vmID)
 	if err != nil {
 		t.Fatalf("layer blob should exist after commit: %v", err)
 	}
@@ -854,7 +854,7 @@ func TestErofsMultiLayerViewMounts(t *testing.T) {
 	env := newSnapshotTestEnv(t, WithDefaultSize(64*1024*1024))
 
 	// Create first layer with extract label
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	layer1Commit := env.createLayerWithLabels("layer1-active", "", "file1.txt", "layer1", labels)
 
 	// Create second layer on top with extract label
@@ -896,7 +896,7 @@ func TestErofsExtractSnapshotWithParents(t *testing.T) {
 	env := newSnapshotTestEnv(t)
 
 	// Create and commit layers with extract label
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	layer1Commit := env.createLayerWithLabels("layer1-active", "", "file1.txt", "layer1", labels)
 	layer2Commit := env.createLayerWithLabels("layer2-active", layer1Commit, "file2.txt", "layer2", labels)
 
@@ -942,7 +942,7 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 	env := newSnapshotTestEnv(t, WithImmutable())
 
 	// Create and commit a layer with extract label
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the committed snapshot info
@@ -953,7 +953,7 @@ func TestErofsImmutableFlagOnCommit(t *testing.T) {
 	t.Logf("committed snapshot info: %+v", info)
 
 	// Verify the layer blob has immutable flag
-	layerBlob, err := env.snapshotter.findLayerBlob(snapshotID(env.ctx(), t, env.snapshotter, "layer1-active-commit"))
+	layerBlob, err := env.snapshotter.findLayerBlob(env.ctx(), snapshotID(env.ctx(), t, env.snapshotter, "layer1-active-commit"))
 	if err != nil {
 		t.Fatalf("failed to find layer blob: %v", err)
 	}
@@ -986,11 +986,11 @@ func TestErofsImmutableFlagClearedOnRemove(t *testing.T) {
 	skipIfNoImmutableSupport(t, env.tempDir)
 
 	// Create and commit a layer with extract label
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	commitKey := env.createLayerWithLabels("layer1-active", "", "test.txt", "content", labels)
 
 	// Get the layer blob path before removal
-	layerBlob, err := env.snapshotter.findLayerBlob(snapshotID(env.ctx(), t, env.snapshotter, commitKey))
+	layerBlob, err := env.snapshotter.findLayerBlob(env.ctx(), snapshotID(env.ctx(), t, env.snapshotter, commitKey))
 	if err != nil {
 		t.Fatalf("failed to find layer blob: %v", err)
 	}
@@ -1018,7 +1018,7 @@ func TestErofsConcurrentMounts(t *testing.T) {
 	env := newSnapshotTestEnv(t)
 
 	// Create and commit a base layer with extract label
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	baseCommit := env.createLayerWithLabels("base-active", "", "base.txt", "base", labels)
 
 	// Create a View snapshot
@@ -1282,7 +1282,7 @@ func TestErofsConcurrentRemoveAndMounts(t *testing.T) {
 	env := newSnapshotTestEnv(t)
 
 	// Create a committed base layer
-	labels := map[string]string{extractLabel: "true"}
+	labels := map[string]string{LabelExtract: LabelValueTrue}
 	baseCommit := env.createLayerWithLabels("base-active", "", "base.txt", "base", labels)
 
 	// Run multiple iterations to increase chance of hitting race

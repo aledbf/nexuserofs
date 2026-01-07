@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,10 +83,16 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}
 
 	// Mark extract snapshots with a label for TOCTOU-safe detection.
+	// Also add writable size label for active snapshots.
+	snapshotLabels := make(map[string]string)
 	if isExtractKey(key) {
-		opts = append(opts, snapshots.WithLabels(map[string]string{
-			extractLabel: "true",
-		}))
+		snapshotLabels[LabelExtract] = LabelValueTrue
+	}
+	if kind == snapshots.KindActive {
+		snapshotLabels[LabelWritableSize] = strconv.FormatInt(s.defaultWritable, 10)
+	}
+	if len(snapshotLabels) > 0 {
+		opts = append(opts, snapshots.WithLabels(snapshotLabels))
 	}
 
 	if err := s.ms.WithTransaction(ctx, true, func(ctx context.Context) (err error) {
@@ -139,22 +146,30 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 	// For active snapshots, create the writable ext4 layer file.
 	if kind == snapshots.KindActive {
-		if err := checkContext(ctx, "before writable layer creation"); err != nil {
+		if err := s.setupActiveWritableLayer(ctx, snap.ID, key); err != nil {
 			return nil, err
-		}
-		if err := s.createWritableLayer(ctx, snap.ID); err != nil {
-			return nil, fmt.Errorf("create writable layer: %w", err)
-		}
-
-		// For extract snapshots, mount the ext4 on the host so the differ can write to it.
-		if isExtractKey(key) {
-			if err := s.mountBlockRwLayer(ctx, snap.ID); err != nil {
-				return nil, fmt.Errorf("mount writable layer for extraction: %w", err)
-			}
 		}
 	}
 
-	return s.mounts(snap, info)
+	return s.mounts(ctx, snap, info)
+}
+
+// setupActiveWritableLayer creates and optionally mounts the writable ext4 layer for active snapshots.
+func (s *snapshotter) setupActiveWritableLayer(ctx context.Context, snapID, key string) error {
+	if err := checkContext(ctx, "before writable layer creation"); err != nil {
+		return err
+	}
+	if err := s.createWritableLayer(ctx, snapID); err != nil {
+		return fmt.Errorf("create writable layer: %w", err)
+	}
+
+	// For extract snapshots, mount the ext4 on the host so the differ can write to it.
+	if isExtractKey(key) {
+		if err := s.mountBlockRwLayer(ctx, snapID); err != nil {
+			return fmt.Errorf("mount writable layer for extraction: %w", err)
+		}
+	}
+	return nil
 }
 
 // cleanupFailedSnapshot removes temporary and final directories on failure.
@@ -199,7 +214,7 @@ func (s *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 	}); err != nil {
 		return nil, err
 	}
-	return s.mounts(snap, info)
+	return s.mounts(ctx, snap, info)
 }
 
 func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, error) {
@@ -257,7 +272,7 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 
 		// The layer blob is only persisted for committed snapshots.
 		if k == snapshots.KindCommitted {
-			if layerBlob, ferr := s.findLayerBlob(id); ferr == nil {
+			if layerBlob, ferr := s.findLayerBlob(ctx, id); ferr == nil {
 				// Use local variable to avoid polluting the named return 'err'.
 				// If err is set here and is errdefs.IsNotImplemented, the defer
 				// would skip cleanupAfterRemove because err != nil.
@@ -360,6 +375,76 @@ func (s *snapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, fs ...str
 	return s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		return storage.WalkInfo(ctx, fn, fs...)
 	})
+}
+
+// updateSnapshotLabelsByID updates labels on an existing snapshot by its internal ID.
+// This is used for background operations that need to update metadata after the
+// initial snapshot creation, such as fsmeta generation.
+func (s *snapshotter) updateSnapshotLabelsByID(ctx context.Context, id string, labels map[string]string) error {
+	return s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
+		// Find the snapshot key by ID
+		var targetKey string
+		if err := storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+			sid, _, _, getErr := storage.GetInfo(ctx, info.Name)
+			if getErr != nil {
+				return nil //nolint:nilerr // Skip errors, continue walking
+			}
+			if sid == id {
+				targetKey = info.Name
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("walk snapshots: %w", err)
+		}
+
+		if targetKey == "" {
+			return fmt.Errorf("snapshot with id %s not found", id)
+		}
+
+		// Get current info and merge labels
+		_, info, _, err := storage.GetInfo(ctx, targetKey)
+		if err != nil {
+			return fmt.Errorf("get snapshot info: %w", err)
+		}
+
+		if info.Labels == nil {
+			info.Labels = make(map[string]string)
+		}
+		for k, v := range labels {
+			info.Labels[k] = v
+		}
+
+		_, err = storage.UpdateInfo(ctx, info, "labels")
+		return err
+	})
+}
+
+// getSnapshotInfoByID retrieves snapshot info by its internal ID.
+// Returns the info if found, or an error if not found.
+func (s *snapshotter) getSnapshotInfoByID(ctx context.Context, id string) (snapshots.Info, error) {
+	var result snapshots.Info
+	var found bool
+
+	err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
+		return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+			sid, _, _, getErr := storage.GetInfo(ctx, info.Name)
+			if getErr != nil {
+				return nil //nolint:nilerr // Skip errors, continue walking
+			}
+			if sid == id {
+				result = info
+				found = true
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return snapshots.Info{}, err
+	}
+	if !found {
+		return snapshots.Info{}, fmt.Errorf("snapshot with id %s not found", id)
+	}
+	return result, nil
 }
 
 // Usage returns the resources taken by the snapshot.

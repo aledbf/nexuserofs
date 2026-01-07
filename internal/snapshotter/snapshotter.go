@@ -83,11 +83,6 @@ func isMounted(target string) bool {
 	return mounted
 }
 
-// extractLabel is the label key used to mark snapshots for layer extraction.
-// This is stored in the snapshot metadata for atomic reads within transactions,
-// avoiding TOCTOU race conditions that would occur with filesystem markers.
-const extractLabel = "containerd.io/snapshot/erofs.extract"
-
 // NewSnapshotter returns a Snapshotter which uses EROFS+OverlayFS. The layers
 // are stored under the provided root. A metadata file is stored under the root.
 func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
