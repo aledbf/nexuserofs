@@ -93,17 +93,6 @@ func ExtractLayerDigests(layers []VMDKLayerInfo) []digest.Digest {
 	return digests
 }
 
-// ReverseDigests reverses a slice of digests.
-// Note: VMDK and OCI manifest now use the same order (oldest first), so this is
-// mainly useful for converting from snapshot chain order (newest first).
-func ReverseDigests(digests []digest.Digest) []digest.Digest {
-	reversed := make([]digest.Digest, len(digests))
-	for i, d := range digests {
-		reversed[len(digests)-1-i] = d
-	}
-	return reversed
-}
-
 // ParseLayerManifest reads a layer manifest file and returns the digests in VMDK/OCI order.
 // The manifest file contains one digest per line (sha256:hex...), oldest/base layer first.
 // This is the authoritative source for verifying VMDK layer order.

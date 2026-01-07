@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/continuity/fs"
@@ -18,19 +17,7 @@ import (
 	"github.com/aledbf/nexus-erofs/internal/erofs"
 )
 
-// commitSource represents the source directory for EROFS conversion.
-// It abstracts the difference between block mode (ext4 mounted) and
-// directory mode (overlay upper).
-type commitSource struct {
-	// upperDir is the path containing files to convert to EROFS.
-	upperDir string
-
-	// cleanup is called after conversion to release resources (e.g., unmount).
-	// Returns an error if cleanup fails (e.g., unmount failure).
-	cleanup func() error
-}
-
-// resolveCommitSource determines where to read upper directory contents from.
+// getCommitUpperDir returns the upper directory path for EROFS conversion.
 //
 // WHY TWO MODES EXIST:
 //   - Block mode (extract snapshots): ext4 image mounted on host so differs can write.
@@ -38,121 +25,40 @@ type commitSource struct {
 //   - Directory mode (regular snapshots): VM handles overlay, no host mount needed.
 //     The upper directory is directly at fs/.
 //
-// This function returns the appropriate path and a cleanup function.
-func (s *snapshotter) resolveCommitSource(ctx context.Context, id string) (*commitSource, error) {
+// For block mode, the ext4 is already mounted by Prepare() for extract snapshots,
+// so we just return the path without additional mounting.
+func (s *snapshotter) getCommitUpperDir(id string) string {
 	rwLayer := s.writablePath(id)
 
 	// Check if block layer exists (rwlayer.img)
 	if _, err := os.Stat(rwLayer); err != nil {
-		if os.IsNotExist(err) {
-			// Directory mode: no block layer, use overlay upper directly
-			return s.commitSourceFromOverlay(ctx, id)
-		}
-		return nil, fmt.Errorf("access writable layer %s: %w", rwLayer, err)
+		// Directory mode: use overlay upper directly
+		return s.upperPath(id)
 	}
 
-	// Block mode: need to mount/access the ext4 image
-	return s.commitSourceFromBlock(ctx, id, rwLayer)
-}
-
-// commitSourceFromOverlay returns the commit source for directory mode.
-// This is the simple case where the overlay upper is directly accessible.
-func (s *snapshotter) commitSourceFromOverlay(_ context.Context, id string) (*commitSource, error) {
-	return &commitSource{
-		upperDir: s.upperPath(id),
-		cleanup:  func() error { return nil }, // No cleanup needed
-	}, nil
-}
-
-// commitSourceFromBlock returns the commit source for block mode.
-// This handles the case where an ext4 image needs to be mounted.
-//
-// If the ext4 is already mounted (from Prepare for extract snapshots),
-// we use it directly. Otherwise, we mount read-only for commit.
-func (s *snapshotter) commitSourceFromBlock(ctx context.Context, id, rwLayer string) (*commitSource, error) {
-	rwMount := s.blockRwMountPath(id)
-
-	// Check if already mounted (e.g., from Prepare for extract snapshots)
-	alreadyMounted := isMounted(rwMount)
-
-	needsUnmount := false
-	if !alreadyMounted {
-		// Mount read-only for commit (we're just reading the upper contents)
-		if err := s.mountBlockReadOnly(ctx, rwLayer, rwMount); err != nil {
-			return nil, err
-		}
-		needsUnmount = true
-		log.G(ctx).WithField("target", rwMount).Debug("mounted block layer read-only for commit")
-	}
-
-	// Determine upper directory inside the mounted ext4
+	// Block mode: upper directory is inside the mounted ext4
 	upperDir := s.blockUpperPath(id)
 	if _, err := os.Stat(upperDir); os.IsNotExist(err) {
-		// Upper directory doesn't exist inside ext4 - use mount root
-		// This happens when the overlay had no changes
-		upperDir = rwMount
+		// Upper directory doesn't exist - use mount root (no changes case)
+		return s.blockRwMountPath(id)
 	}
-
-	cleanup := func() error {
-		if needsUnmount {
-			if err := unmountAll(rwMount); err != nil {
-				return fmt.Errorf("cleanup block mount for %s: %w", id, err)
-			}
-		}
-		return nil
-	}
-
-	return &commitSource{
-		upperDir: upperDir,
-		cleanup:  cleanup,
-	}, nil
-}
-
-// mountBlockReadOnly mounts an ext4 image read-only for reading upper contents.
-func (s *snapshotter) mountBlockReadOnly(ctx context.Context, source, target string) error {
-	if err := os.MkdirAll(target, 0755); err != nil {
-		return fmt.Errorf("create mount point: %w", err)
-	}
-
-	m := mount.Mount{
-		Source:  source,
-		Type:    "ext4",
-		Options: []string{"ro", "loop", "noload"},
-	}
-
-	if err := m.Mount(target); err != nil {
-		return &BlockMountError{
-			Source: source,
-			Target: target,
-			Cause:  err,
-		}
-	}
-
-	return nil
+	return upperDir
 }
 
 // commitBlock handles the conversion of a writable layer to EROFS.
 // It determines the appropriate source (block or overlay) and performs conversion.
 func (s *snapshotter) commitBlock(ctx context.Context, layerBlob string, id string) error {
-	source, err := s.resolveCommitSource(ctx, id)
-	if err != nil {
-		return err
-	}
+	upperDir := s.getCommitUpperDir(id)
 
-	convErr := convertDirToErofs(ctx, layerBlob, source.upperDir)
-
-	// Always attempt cleanup, even if conversion failed
-	cleanupErr := source.cleanup()
-
-	if convErr != nil {
+	if err := convertDirToErofs(ctx, layerBlob, upperDir); err != nil {
 		return &CommitConversionError{
 			SnapshotID: id,
-			UpperDir:   source.upperDir,
-			Cause:      convErr,
+			UpperDir:   upperDir,
+			Cause:      err,
 		}
 	}
 
-	return cleanupErr
+	return nil
 }
 
 // generateFsMeta creates a merged fsmeta.erofs and VMDK descriptor for VM runtimes.

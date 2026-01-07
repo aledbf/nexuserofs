@@ -220,7 +220,7 @@ func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error
 	return paths, nil
 }
 
-// viewMounts returns mounts for multi-layer KindView snapshots.
+// buildErofsLayerMounts returns read-only EROFS layer mounts for a snapshot.
 //
 // Prefers fsmeta mount (type: format/erofs) when available because it reduces
 // the number of virtio-blk devices the VM runtime needs to manage. Falls back
@@ -229,7 +229,7 @@ func (s *snapshotter) getErofsLayerPaths(snap storage.Snapshot) ([]string, error
 // Return formats:
 //   - With fsmeta: [{type: format/erofs, source: fsmeta.erofs, options: [device=layer1, ...]}]
 //   - Without:     [{type: erofs, source: layer1.erofs}, {type: erofs, source: layer2.erofs}, ...]
-func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+func (s *snapshotter) buildErofsLayerMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	// Try fsmeta first (single mount with VMDK) - preferred for efficiency
 	if m, ok := s.mountFsMeta(snap); ok {
 		return []mount.Mount{m}, nil
@@ -255,37 +255,21 @@ func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
 	return mounts, nil
 }
 
+// viewMounts returns mounts for multi-layer KindView snapshots.
+func (s *snapshotter) viewMounts(snap storage.Snapshot) ([]mount.Mount, error) {
+	return s.buildErofsLayerMounts(snap)
+}
+
 // activeMounts returns mounts for active (writable) snapshots with parents.
 //
 // Returns read-only EROFS layer(s) plus a writable ext4 block device.
 // The VM runtime creates an overlay filesystem from these inside the guest.
-//
-// Return formats:
-//   - With fsmeta: [{format/erofs, fsmeta.erofs}, {ext4, rwlayer.img}]
-//   - Without:     [{erofs, layer1.erofs}, {erofs, layer2.erofs}, ..., {ext4, rwlayer.img}]
-//
 // The ext4 mount is always last, making it easy for consumers to identify
 // the writable layer.
 func (s *snapshotter) activeMounts(snap storage.Snapshot) ([]mount.Mount, error) {
-	var mounts []mount.Mount
-
-	// Read-only layers: prefer fsmeta for fewer virtio-blk devices
-	if m, ok := s.mountFsMeta(snap); ok {
-		mounts = append(mounts, m)
-	} else {
-		// Fallback: individual EROFS mounts
-		layerPaths, err := s.getErofsLayerPaths(snap)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, layerPath := range layerPaths {
-			mounts = append(mounts, mount.Mount{
-				Source:  layerPath,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			})
-		}
+	mounts, err := s.buildErofsLayerMounts(snap)
+	if err != nil {
+		return nil, err
 	}
 
 	// Writable layer: ext4 block device (always last)

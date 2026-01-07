@@ -94,24 +94,6 @@ func TestExtractLayerDigests(t *testing.T) {
 	}
 }
 
-func TestReverseDigests(t *testing.T) {
-	input := []digest.Digest{
-		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	}
-	expected := []digest.Digest{
-		"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	}
-
-	result := ReverseDigests(input)
-	if !reflect.DeepEqual(result, expected) {
-		t.Errorf("ReverseDigests = %v, want %v", result, expected)
-	}
-}
-
 func TestParseVMDK_WithFallbackNaming(t *testing.T) {
 	// Test VMDK with fallback naming (snapshot-*.erofs)
 	vmdkContent := `# Disk DescriptorFile

@@ -52,70 +52,6 @@ func buildTarErofsArgs(layerPath, uuid string, mkfsExtraOpts []string) []string 
 	return args
 }
 
-// ConvertTarErofs converts a tar stream to an EROFS image.
-// The tar content is read from stdin (r) and written to layerPath.
-func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, mkfsExtraOpts []string) error {
-	args := buildTarErofsArgs(layerPath, uuid, mkfsExtraOpts)
-	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
-
-	// Use StdinPipe for better control and error visibility
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	// Capture both stdout and stderr
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		stdin.Close()
-		return fmt.Errorf("failed to start mkfs.erofs: %w", err)
-	}
-
-	// Copy tar data to stdin in a goroutine
-	type copyResult struct {
-		n   int64
-		err error
-	}
-	copyDone := make(chan copyResult, 1)
-	go func() {
-		n, err := io.Copy(stdin, r)
-		stdin.Close()
-		copyDone <- copyResult{n, err}
-	}()
-
-	// Wait for command to complete
-	waitErr := cmd.Wait()
-	result := <-copyDone
-
-	// Log copy result
-	if result.err != nil {
-		log.G(ctx).WithError(result.err).Errorf("failed to pipe tar data to mkfs.erofs (wrote %d bytes)", result.n)
-	} else {
-		log.G(ctx).Debugf("piped %d bytes of tar data to mkfs.erofs", result.n)
-	}
-
-	// Prioritize mkfs.erofs error since it tells us WHY it failed
-	if waitErr != nil {
-		return fmt.Errorf("mkfs.erofs %v failed (piped %d bytes): stdout=%s stderr=%s: %w",
-			args,
-			result.n,
-			stringutil.TruncateOutput(stdout.Bytes(), 512),
-			stringutil.TruncateOutput(stderr.Bytes(), 512),
-			waitErr)
-	}
-
-	// If mkfs.erofs succeeded but we had a copy error, that's unexpected
-	if result.err != nil {
-		return fmt.Errorf("mkfs.erofs succeeded but pipe failed (wrote %d bytes): %w", result.n, result.err)
-	}
-
-	log.G(ctx).Debugf("mkfs.erofs %v: stdout=%s stderr=%s", args, stdout.String(), stderr.String())
-	return nil
-}
-
 // buildTarIndexArgs constructs the command-line arguments for mkfs.erofs
 // when generating a tar index.
 //
@@ -125,6 +61,68 @@ func buildTarIndexArgs(layerPath string, mkfsExtraOpts []string) []string {
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
 	args = append(args, layerPath)
 	return args
+}
+
+// runMkfsWithStdin pipes data from reader to mkfs.erofs and captures output.
+// Returns the number of bytes piped and any error.
+func runMkfsWithStdin(ctx context.Context, r io.Reader, args []string) (int64, error) {
+	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return 0, fmt.Errorf("create stdin pipe: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		return 0, fmt.Errorf("start mkfs.erofs: %w", err)
+	}
+
+	// Copy data to stdin in a goroutine
+	type copyResult struct {
+		n   int64
+		err error
+	}
+	copyDone := make(chan copyResult, 1)
+	go func() {
+		n, copyErr := io.Copy(stdin, r)
+		stdin.Close()
+		copyDone <- copyResult{n, copyErr}
+	}()
+
+	waitErr := cmd.Wait()
+	result := <-copyDone
+
+	if result.err != nil {
+		log.G(ctx).WithError(result.err).Debugf("pipe error (wrote %d bytes)", result.n)
+	}
+
+	if waitErr != nil {
+		return result.n, fmt.Errorf("mkfs.erofs %v failed (piped %d bytes): stdout=%s stderr=%s: %w",
+			args, result.n,
+			stringutil.TruncateOutput(stdout.Bytes(), 512),
+			stringutil.TruncateOutput(stderr.Bytes(), 512),
+			waitErr)
+	}
+
+	if result.err != nil {
+		return result.n, fmt.Errorf("mkfs.erofs succeeded but pipe failed (wrote %d bytes): %w", result.n, result.err)
+	}
+
+	log.G(ctx).Debugf("mkfs.erofs %v: piped %d bytes", args, result.n)
+	return result.n, nil
+}
+
+// ConvertTarErofs converts a tar stream to an EROFS image.
+// The tar content is read from stdin (r) and written to layerPath.
+func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, mkfsExtraOpts []string) error {
+	args := buildTarErofsArgs(layerPath, uuid, mkfsExtraOpts)
+	_, err := runMkfsWithStdin(ctx, r, args)
+	return err
 }
 
 // GenerateTarIndexAndAppendTar calculates tar index using --tar=i option
@@ -137,7 +135,7 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	// Create a temporary file for storing the tar content
 	tarFile, err := os.CreateTemp("", "erofs-tar-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary tar file: %w", err)
+		return fmt.Errorf("create temporary tar file: %w", err)
 	}
 	defer os.Remove(tarFile.Name())
 	defer tarFile.Close()
@@ -146,83 +144,27 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	teeReader := io.TeeReader(r, tarFile)
 
 	args := buildTarIndexArgs(layerPath, mkfsExtraOpts)
-	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
-
-	// Use StdinPipe for better control and error visibility
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
+	if _, err := runMkfsWithStdin(ctx, teeReader, args); err != nil {
+		return fmt.Errorf("tar index generation: %w", err)
 	}
-
-	// Capture both stdout and stderr
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		stdin.Close()
-		return fmt.Errorf("failed to start mkfs.erofs: %w", err)
-	}
-
-	// Copy tar data to stdin in a goroutine
-	type copyResult struct {
-		n   int64
-		err error
-	}
-	copyDone := make(chan copyResult, 1)
-	go func() {
-		n, err := io.Copy(stdin, teeReader)
-		stdin.Close()
-		copyDone <- copyResult{n, err}
-	}()
-
-	// Wait for command to complete
-	waitErr := cmd.Wait()
-	result := <-copyDone
-
-	// Log copy result
-	if result.err != nil {
-		log.G(ctx).WithError(result.err).Errorf("failed to pipe tar data to mkfs.erofs --tar=i (wrote %d bytes)", result.n)
-	} else {
-		log.G(ctx).Debugf("piped %d bytes of tar data to mkfs.erofs --tar=i", result.n)
-	}
-
-	// Prioritize mkfs.erofs error since it tells us WHY it failed
-	if waitErr != nil {
-		return fmt.Errorf("tar index generation failed: mkfs.erofs %v (piped %d bytes): stdout=%s stderr=%s: %w",
-			args,
-			result.n,
-			stringutil.TruncateOutput(stdout.Bytes(), 512),
-			stringutil.TruncateOutput(stderr.Bytes(), 512),
-			waitErr)
-	}
-
-	// If mkfs.erofs succeeded but we had a copy error, that's unexpected
-	if result.err != nil {
-		return fmt.Errorf("mkfs.erofs --tar=i succeeded but pipe failed (wrote %d bytes): %w", result.n, result.err)
-	}
-
-	log.G(ctx).Debugf("mkfs.erofs --tar=i %v: stdout=%s stderr=%s", args, stdout.String(), stderr.String())
 
 	// Open layerPath for appending
 	f, err := os.OpenFile(layerPath, os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("failed to open layer file for appending: %w", err)
+		return fmt.Errorf("open layer file for appending: %w", err)
 	}
 	defer f.Close()
 
-	// Rewind the temporary file
+	// Rewind the temporary file and append tar content
 	if _, err := tarFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek to the beginning of tar file: %w", err)
+		return fmt.Errorf("seek to beginning of tar file: %w", err)
 	}
 
-	// Append tar content
 	if _, err := io.Copy(f, tarFile); err != nil {
-		return fmt.Errorf("failed to append tar to layer: %w", err)
+		return fmt.Errorf("append tar to layer: %w", err)
 	}
 
-	log.G(ctx).Infof("Successfully generated EROFS layer with tar index and tar content: %s", layerPath)
-
+	log.G(ctx).Debugf("generated EROFS layer with tar index: %s", layerPath)
 	return nil
 }
 
