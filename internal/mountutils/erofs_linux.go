@@ -26,7 +26,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/aledbf/nexus-erofs/internal/loop"
+	"github.com/spin-stack/erofs-snapshotter/internal/loop"
 	"github.com/containerd/containerd/v2/core/mount"
 )
 

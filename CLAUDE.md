@@ -1,4 +1,4 @@
-# nexus-erofs Snapshotter
+# erofs Snapshotter
 
 **CLAUDE.md Version**: 1.0.0
 **Last Updated**: 2025-01-09
@@ -154,7 +154,7 @@ All checks must pass before committing.
 ```
 .
 ├── cmd/
-│   └── nexus-erofs-snapshotter/  # Main entry point
+│   └── erofs-snapshotter/  # Main entry point
 ├── internal/
 │   ├── snapshotter/              # Core snapshotter (see CLAUDE.md)
 │   ├── differ/                   # EROFS differ (see CLAUDE.md)
@@ -177,7 +177,7 @@ All checks must pass before committing.
 
 ### Key Directories
 
-**Main Entry Point** (`cmd/nexus-erofs-snapshotter/`):
+**Main Entry Point** (`cmd/erofs-snapshotter/`):
 - `main.go` - CLI flags, gRPC server setup, signal handling
 - Configuration via flags or environment variables
 
@@ -267,7 +267,7 @@ if errors.As(err, &notFound) {
 Snapshot directory structure:
 
 ```
-/var/lib/nexus-erofs-snapshotter/
+/var/lib/erofs-snapshotter/
 ├── metadata.db                   # bbolt database
 ├── mounts.db                     # Mount tracking database
 └── snapshots/{id}/
