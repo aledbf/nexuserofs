@@ -8,11 +8,11 @@ version = 2
 [proxy_plugins]
   [proxy_plugins.spin-erofs]
     type = "snapshot"
-    address = "/run/erofs-snapshotter/snapshotter.sock"
+    address = "/run/spin-stack/erofs-snapshotter/snapshotter.sock"
 
   [proxy_plugins.spin-erofs-diff]
     type = "diff"
-    address = "/run/erofs-snapshotter/snapshotter.sock"
+    address = "/run/spin-stack/erofs-snapshotter/snapshotter.sock"
 
 # Optional: Use spin-erofs as the default snapshotter for CRI
 [plugins."io.containerd.cri.v1.images"]

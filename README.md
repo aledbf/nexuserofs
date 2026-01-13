@@ -190,7 +190,7 @@ Guest sees: /dev/vda (single device containing entire image)
 Creating a new image from a running container:
 
 ```bash
-nerdctl --address /var/run/qemubox/containerd.sock \
+nerdctl --address /var/run/spin-stack/spin/containerd.sock \
     commit --snapshotter spin-erofs \
     container-name docker.io/user/image:tag
 ```
