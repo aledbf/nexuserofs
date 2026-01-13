@@ -107,7 +107,7 @@ func (s *snapshotter) snapshotIDExists(ctx context.Context, targetID string) boo
 		return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
 			id, _, _, err := storage.GetInfo(ctx, info.Name)
 			if err != nil {
-				return nil // Continue on error
+				return nil //nolint:nilerr // intentionally continue walking on individual snapshot errors
 			}
 			if id == targetID {
 				found = true
