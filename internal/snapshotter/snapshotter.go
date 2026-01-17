@@ -93,6 +93,39 @@ type snapshotter struct {
 	// layerCache caches layer blob paths to avoid repeated filesystem lookups.
 	// Uses LRU with TTL to bound memory usage.
 	layerCache *expirable.LRU[string, string]
+
+	// keyLocks provides per-key mutual exclusion to serialize Commit and Remove
+	// operations on the same snapshot. This prevents race conditions where Remove
+	// deletes a snapshot's metadata while Commit is still processing it.
+	keyLocks keyLocker
+}
+
+// keyLocker provides per-key mutual exclusion using a striped lock approach.
+// Keys are hashed to one of a fixed number of mutexes to bound memory usage
+// while providing sufficient parallelism for different keys.
+type keyLocker struct {
+	locks [64]sync.Mutex
+}
+
+// lock acquires the mutex for the given key and returns an unlock function.
+func (kl *keyLocker) lock(key string) func() {
+	idx := keyHash(key) % uint32(len(kl.locks))
+	kl.locks[idx].Lock()
+	return func() { kl.locks[idx].Unlock() }
+}
+
+// keyHash computes a simple hash of the key string using FNV-1a.
+func keyHash(key string) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := range len(key) {
+		h ^= uint32(key[i])
+		h *= prime32
+	}
+	return h
 }
 
 // isMounted checks if a path is currently mounted.

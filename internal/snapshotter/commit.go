@@ -427,7 +427,15 @@ func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) er
 //
 // If no layer blob exists (EROFS differ hasn't processed it), we fall back
 // to converting the upper directory ourselves using the fallback naming scheme.
+//
+// CONCURRENCY: Commit and Remove are serialized per-key using keyLocks to prevent
+// race conditions where Remove deletes metadata while Commit is processing.
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
+	// Acquire per-key lock to serialize with Remove operations.
+	// This prevents Remove from deleting the snapshot while we're committing.
+	unlock := s.keyLocks.lock(key)
+	defer unlock()
+
 	var layerBlob string
 	var id string
 
