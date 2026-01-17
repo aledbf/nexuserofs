@@ -57,7 +57,7 @@ func TestParallelUnpackParentNotReady(t *testing.T) {
 
 // TestParallelUnpackSimulation simulates containerd's parallel layer unpacking
 // where multiple layers are prepared and committed concurrently.
-// This test verifies the snapshotter handles the race conditions correctly.
+// This test verifies the snapshotter's waitForParent logic handles race conditions.
 func TestParallelUnpackSimulation(t *testing.T) {
 	s := newTestSnapshotter(t)
 	ctx := t.Context()
@@ -66,20 +66,20 @@ func TestParallelUnpackSimulation(t *testing.T) {
 	// Layer order: layer0 (base) -> layer1 -> layer2 -> layer3 -> layer4
 	const numLayers = 5
 
-	// Track which layers are committed
-	committed := make([]atomic.Bool, numLayers)
-
 	// Error channel to collect errors from goroutines
 	errCh := make(chan error, numLayers*2)
 
 	var wg sync.WaitGroup
 
-	// Each layer runs in its own goroutine, simulating parallel unpack
+	// Each layer runs in its own goroutine, simulating parallel unpack.
+	// The snapshotter's waitForParent handles the race condition internally,
+	// so we don't need explicit retry loops here.
 	for i := range numLayers {
 		wg.Add(1)
 		go func(layerIdx int) {
 			defer wg.Done()
 
+			// Use extract- prefix to trigger parallel unpack handling
 			prepareKey := fmt.Sprintf("default/%d/extract-%d", layerIdx, time.Now().UnixNano())
 			commitKey := fmt.Sprintf("layer-%d", layerIdx)
 
@@ -88,49 +88,20 @@ func TestParallelUnpackSimulation(t *testing.T) {
 				parent = fmt.Sprintf("layer-%d", layerIdx-1)
 			}
 
-			// Retry loop - simulates containerd's retry on ErrNotFound
-			const maxRetries = 50
-			var lastErr error
-
-			for attempt := range maxRetries {
-				// Check if parent is committed (if we have one)
-				if layerIdx > 0 && !committed[layerIdx-1].Load() {
-					// Parent not ready - in real containerd this triggers retry
-					time.Sleep(10 * time.Millisecond)
-					continue
-				}
-
-				_, err := s.Prepare(ctx, prepareKey, parent)
-				if err != nil {
-					// Both NotFound and InvalidArgument indicate parent isn't ready:
-					// - NotFound: parent doesn't exist yet
-					// - InvalidArgument: parent exists but isn't committed
-					if errdefs.IsNotFound(err) || errdefs.IsInvalidArgument(err) {
-						// Parent not ready - retry
-						lastErr = err
-						time.Sleep(10 * time.Millisecond)
-						continue
-					}
-					errCh <- fmt.Errorf("layer %d prepare (attempt %d): %w", layerIdx, attempt, err)
-					return
-				}
-
-				// Simulate some work (unpacking layer content)
-				time.Sleep(time.Duration(5+layerIdx*2) * time.Millisecond)
-
-				// Commit the layer
-				if err := s.Commit(ctx, commitKey, prepareKey); err != nil {
-					errCh <- fmt.Errorf("layer %d commit: %w", layerIdx, err)
-					return
-				}
-
-				// Mark as committed
-				committed[layerIdx].Store(true)
+			// Prepare will internally wait for parent to be committed
+			_, err := s.Prepare(ctx, prepareKey, parent)
+			if err != nil {
+				errCh <- fmt.Errorf("layer %d prepare: %w", layerIdx, err)
 				return
 			}
 
-			if lastErr != nil {
-				errCh <- fmt.Errorf("layer %d exhausted retries, last error: %w", layerIdx, lastErr)
+			// Simulate some work (unpacking layer content)
+			time.Sleep(time.Duration(5+layerIdx*2) * time.Millisecond)
+
+			// Commit the layer
+			if err := s.Commit(ctx, commitKey, prepareKey); err != nil {
+				errCh <- fmt.Errorf("layer %d commit: %w", layerIdx, err)
+				return
 			}
 		}(i)
 	}
@@ -151,14 +122,7 @@ func TestParallelUnpackSimulation(t *testing.T) {
 		t.FailNow()
 	}
 
-	// Verify all layers were committed
-	for i := range numLayers {
-		if !committed[i].Load() {
-			t.Errorf("layer %d was not committed", i)
-		}
-	}
-
-	// Verify snapshots exist and have correct parent relationships
+	// Verify all snapshots exist and have correct parent relationships
 	for i := range numLayers {
 		key := fmt.Sprintf("layer-%d", i)
 		info, err := s.Stat(ctx, key)

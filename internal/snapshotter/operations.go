@@ -41,6 +41,17 @@ func (e *ParentNotCommittedError) Is(target error) bool {
 // This includes reading layer blobs and running mkfs.erofs.
 const fsmetaTimeout = 5 * time.Minute
 
+const (
+	// parentWaitTimeout is the maximum time to wait for a parent snapshot
+	// to be committed during parallel layer unpacking.
+	parentWaitTimeout = 30 * time.Second
+	// parentWaitInterval is the initial interval between checks for parent existence.
+	// Start with a very short interval since most parents are ready quickly.
+	parentWaitInterval = 10 * time.Millisecond
+	// parentWaitMaxInterval is the maximum interval between checks.
+	parentWaitMaxInterval = 200 * time.Millisecond
+)
+
 // isExtractKey returns true if the key indicates an extract/unpack operation.
 // Snapshot keys use forward slashes as separators (e.g., "default/1/extract-12345"),
 // so we use path.Base (POSIX paths) rather than filepath.Base (OS-specific).
@@ -104,6 +115,53 @@ func (s *snapshotter) startFsmetaGeneration(parentIDs []string) {
 	}(parentIDs)
 }
 
+// waitForParent waits for a parent snapshot to exist in metadata.
+// This handles the race condition during parallel layer unpacking where a child
+// layer's Prepare is called before the parent layer's Commit completes.
+//
+// Uses exponential backoff starting from a short interval (10ms) since most
+// parents are ready quickly. This is more efficient than containerd's retry
+// mechanism which would require a full round-trip through the unpack stack.
+func (s *snapshotter) waitForParent(ctx context.Context, parent string) error {
+	// Fast path: check if parent already exists
+	if s.snapshotExists(ctx, parent) {
+		return nil
+	}
+
+	log.G(ctx).WithField("parent", parent).Debug("waiting for parent snapshot to be committed")
+
+	deadline := time.Now().Add(parentWaitTimeout)
+	interval := parentWaitInterval
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+			if s.snapshotExists(ctx, parent) {
+				log.G(ctx).WithField("parent", parent).Debug("parent snapshot now available")
+				return nil
+			}
+			// Exponential backoff with cap
+			interval = min(interval*2, parentWaitMaxInterval)
+		}
+	}
+
+	return &ParentNotCommittedError{Parent: parent}
+}
+
+// snapshotExists checks if a snapshot with the given key exists in metadata.
+func (s *snapshotter) snapshotExists(ctx context.Context, key string) bool {
+	var exists bool
+	_ = s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
+		_, _, _, err := storage.GetInfo(ctx, key)
+		exists = err == nil
+		return nil
+	})
+	return exists
+}
+
+//nolint:cyclop // complexity needed for parallel unpack wait logic and snapshot lifecycle
 func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
 	var (
 		snap     storage.Snapshot
@@ -132,6 +190,16 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		opts = append(opts, snapshots.WithLabels(map[string]string{
 			extractLabel: "true",
 		}))
+	}
+
+	// For parallel layer unpacking, wait for the parent snapshot to be committed.
+	// When containerd unpacks layers in parallel, a child layer's Prepare may be
+	// called before the parent layer's Commit completes. We wait with exponential
+	// backoff to allow the parent commit to finish.
+	if parent != "" && isExtractKey(key) {
+		if err := s.waitForParent(ctx, parent); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := s.ms.WithTransaction(ctx, true, func(ctx context.Context) (err error) {
