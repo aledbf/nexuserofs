@@ -111,8 +111,10 @@ func (s *snapshotter) snapshotIDExists(ctx context.Context, targetID string) boo
 	_ = s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
 		ids, err := storage.IDMap(ctx)
 		if err != nil {
-			// "bucket does not exist" means empty database - no snapshots exist
-			return nil
+			// "bucket does not exist" means empty database - no snapshots exist.
+			// This is expected on first startup, so we intentionally return nil
+			// to treat it as "snapshot not found" rather than propagating the error.
+			return nil //nolint:nilerr // intentional: empty DB means no snapshots
 		}
 		_, found = ids[targetID]
 		return nil
