@@ -221,7 +221,7 @@ func run(cliCtx *cli.Context) error {
 		grpc.MaxConcurrentStreams(1000), // Ensure we can handle many concurrent requests
 	)
 
-	// Register snapshot service (using our fixed service that supports rebase)
+	// Register snapshot service
 	snapshotsapi.RegisterSnapshotsServer(rpc, grpcservice.FromSnapshotter(sn))
 
 	// Register diff service

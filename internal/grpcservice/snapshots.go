@@ -15,8 +15,7 @@
 */
 
 // Package grpcservice provides gRPC service wrappers for containerd plugins.
-// This is a fork of containerd's contrib/snapshotservice with fixes for
-// parallel unpacking support (rebase capability).
+// This is based on containerd's contrib/snapshotservice.
 package grpcservice
 
 import (
@@ -41,8 +40,6 @@ type service struct {
 }
 
 // FromSnapshotter returns a Snapshot API server from a containerd snapshotter.
-// This is a fixed version of containerd's contrib/snapshotservice that properly
-// handles the Parent field in CommitSnapshotRequest for rebase support.
 func FromSnapshotter(sn snapshots.Snapshotter) snapshotsapi.SnapshotsServer {
 	return &service{sn: sn}
 }
@@ -116,12 +113,6 @@ func (s *service) Commit(ctx context.Context, cr *snapshotsapi.CommitSnapshotReq
 	var opts []snapshots.Opt
 	if cr.Labels != nil {
 		opts = append(opts, snapshots.WithLabels(cr.Labels))
-	}
-	// FIX: Pass Parent field for rebase support (missing in contrib/snapshotservice)
-	// This is required for parallel layer unpacking with the "rebase" capability.
-	// See: https://github.com/containerd/containerd/issues/8881
-	if cr.Parent != "" {
-		opts = append(opts, snapshots.WithParent(cr.Parent))
 	}
 	if err := s.sn.Commit(ctx, cr.Name, cr.Key, opts...); err != nil {
 		log.G(ctx).WithError(err).WithFields(log.Fields{

@@ -375,22 +375,12 @@ type Environment struct {
 	// Client
 	client *client.Client
 
-	// Configuration options
-	capabilities []string // Snapshotter capabilities (e.g., ["rebase"])
-
 	// Mutex for concurrent access
 	mu sync.Mutex
 }
 
 // EnvOption configures an Environment.
 type EnvOption func(*Environment)
-
-// WithCapabilities sets the snapshotter capabilities in containerd config.
-func WithCapabilities(caps ...string) EnvOption {
-	return func(e *Environment) {
-		e.capabilities = caps
-	}
-}
 
 // NewEnvironment creates a new test environment.
 // It initializes directories but does not start services.
@@ -524,17 +514,6 @@ func (e *Environment) LogDir() string {
 func (e *Environment) writeContainerdConfig() error {
 	configPath := filepath.Join(e.rootDir, "containerd.toml")
 
-	// Build capabilities line if set
-	var capabilitiesLine string
-	if len(e.capabilities) > 0 {
-		// Format as TOML array: capabilities = ["rebase"]
-		quoted := make([]string, len(e.capabilities))
-		for i, c := range e.capabilities {
-			quoted[i] = fmt.Sprintf("%q", c)
-		}
-		capabilitiesLine = fmt.Sprintf("    capabilities = [%s]\n", strings.Join(quoted, ", "))
-	}
-
 	config := fmt.Sprintf(`version = 2
 root = %q
 
@@ -545,7 +524,7 @@ root = %q
   [proxy_plugins.spin-erofs]
     type = "snapshot"
     address = %q
-%s
+
   [proxy_plugins.spin-erofs-diff]
     type = "diff"
     address = %q
@@ -561,7 +540,7 @@ root = %q
 
 [plugins."io.containerd.cri.v1.images"]
   snapshotter = "spin-erofs"
-`, e.containerdRoot, e.containerdSocket, e.snapshotterSocket, capabilitiesLine, e.snapshotterSocket)
+`, e.containerdRoot, e.containerdSocket, e.snapshotterSocket, e.snapshotterSocket)
 
 	return os.WriteFile(configPath, []byte(config), 0o644)
 }
@@ -1577,7 +1556,7 @@ func TestParallelUnpackWithRebase(t *testing.T) {
 		t.Skipf("prerequisites not met: %v", err)
 	}
 
-	env := NewEnvironment(t, WithCapabilities("rebase"))
+	env := NewEnvironment(t)
 	t.Cleanup(func() {
 		env.Stop()
 		env.dumpLogs("snapshotter")

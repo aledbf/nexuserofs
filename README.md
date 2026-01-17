@@ -331,8 +331,6 @@ version = 2
   [proxy_plugins.spin-erofs]
     type = "snapshot"
     address = "/run/spin-stack/erofs-snapshotter.sock"
-    # Enable parallel layer unpacking (requires containerd 2.0+)
-    capabilities = ["rebase"]
 
   [proxy_plugins.spin-erofs-diff]
     type = "diff"
