@@ -235,7 +235,7 @@ func TestFsmetaMountReturnsFormatErofs(t *testing.T) {
 
 	// Create fake snapshot directories with fsmeta and vmdk files
 	snapshotDir := filepath.Join(root, "snapshots", "parent1")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,7 +246,7 @@ func TestFsmetaMountReturnsFormatErofs(t *testing.T) {
 	layerPath := filepath.Join(snapshotDir, "sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs")
 
 	for _, path := range []string{vmdkPath, fsmetaPath, layerPath} {
-		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
+		if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -306,12 +306,12 @@ func TestFsmetaMountDeviceOrder(t *testing.T) {
 	layerPaths := make(map[string]string)
 	for _, pid := range parentIDs {
 		snapshotDir := filepath.Join(root, "snapshots", pid)
-		if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		// Use digest-based layer names (64 hex chars required)
 		layerPath := filepath.Join(snapshotDir, "sha256-"+pid+pid+pid+pid+pid+pid+pid+pid+".erofs")
-		if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+		if err := os.WriteFile(layerPath, []byte("fake"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		layerPaths[pid] = layerPath
@@ -330,7 +330,7 @@ func TestFsmetaMountDeviceOrder(t *testing.T) {
 	vmdkPath := filepath.Join(newestDir, "merged.vmdk")
 	fsmetaPath := filepath.Join(newestDir, "fsmeta.erofs")
 	for _, path := range []string{vmdkPath, fsmetaPath} {
-		if err := os.WriteFile(path, []byte("fake"), 0644); err != nil {
+		if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

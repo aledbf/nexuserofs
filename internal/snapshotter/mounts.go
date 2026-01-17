@@ -66,7 +66,7 @@ func (s *snapshotter) layerMounts(snap storage.Snapshot) ([]mount.Mount, error) 
 // This is rare but valid for empty base images with no parents.
 func (s *snapshotter) emptyLayerMount(id string) ([]mount.Mount, error) {
 	fsPath := s.viewLowerPath(id)
-	if err := os.MkdirAll(fsPath, 0755); err != nil {
+	if err := os.MkdirAll(fsPath, 0o755); err != nil {
 		return nil, fmt.Errorf("create view fs directory: %w", err)
 	}
 	return []mount.Mount{{

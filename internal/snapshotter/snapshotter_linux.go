@@ -329,7 +329,7 @@ func (s *snapshotter) mountBlockRwLayer(ctx context.Context, id string) error {
 	rwMountPath := s.blockRwMountPath(id)
 
 	// Create mount point
-	if err := os.MkdirAll(rwMountPath, 0755); err != nil {
+	if err := os.MkdirAll(rwMountPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create rw mount point: %w", err)
 	}
 
@@ -347,14 +347,14 @@ func (s *snapshotter) mountBlockRwLayer(ctx context.Context, id string) error {
 	upperDir := s.blockUpperPath(id)
 	workDir := filepath.Join(s.blockRwMountPath(id), "work")
 
-	if err := os.MkdirAll(upperDir, 0755); err != nil {
+	if err := os.MkdirAll(upperDir, 0o755); err != nil {
 		// Cleanup mount on failure - log if unmount also fails
 		if derr := unmountAll(rwMountPath); derr != nil && !isNotMountError(derr) {
 			log.G(ctx).WithError(derr).WithField("path", rwMountPath).Debug("cleanup unmount failed after upper dir creation error")
 		}
 		return fmt.Errorf("failed to create upper directory: %w", err)
 	}
-	if err := os.MkdirAll(workDir, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		if derr := unmountAll(rwMountPath); derr != nil && !isNotMountError(derr) {
 			log.G(ctx).WithError(derr).WithField("path", rwMountPath).Debug("cleanup unmount failed after work dir creation error")
 		}

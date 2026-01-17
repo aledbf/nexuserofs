@@ -125,13 +125,13 @@ func TestMountsToLayerWithMarker(t *testing.T) {
 	// Create a temp directory with the erofs layer marker
 	dir := t.TempDir()
 	markerPath := filepath.Join(dir, ErofsLayerMarker)
-	if err := os.WriteFile(markerPath, nil, 0600); err != nil {
+	if err := os.WriteFile(markerPath, nil, 0o600); err != nil {
 		t.Fatalf("failed to create marker file: %v", err)
 	}
 
 	// Create fs subdirectory for bind mount source
 	fsDir := filepath.Join(dir, "fs")
-	if err := os.Mkdir(fsDir, 0755); err != nil {
+	if err := os.Mkdir(fsDir, 0o755); err != nil {
 		t.Fatalf("failed to create fs dir: %v", err)
 	}
 
@@ -206,20 +206,20 @@ func TestMountsToLayerOverlay(t *testing.T) {
 
 	// Create upperdir parent with marker
 	upperParent := filepath.Join(baseDir, "upper-parent")
-	if err := os.MkdirAll(filepath.Join(upperParent, "upper"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(upperParent, "upper"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(upperParent, ErofsLayerMarker), nil, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(upperParent, ErofsLayerMarker), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create lowerdir parent with marker
 	lowerParent := filepath.Join(baseDir, "lower-parent")
 	lowerDir := filepath.Join(lowerParent, "lower")
-	if err := os.MkdirAll(lowerDir, 0755); err != nil {
+	if err := os.MkdirAll(lowerDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lowerParent, ErofsLayerMarker), nil, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(lowerParent, ErofsLayerMarker), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -542,7 +542,7 @@ func createTestTar(t *testing.T) *bytes.Buffer {
 	// Add a directory
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "testdir/",
-		Mode:     0755,
+		Mode:     0o755,
 		Typeflag: tar.TypeDir,
 		ModTime:  time.Now(),
 	}); err != nil {
@@ -553,7 +553,7 @@ func createTestTar(t *testing.T) *bytes.Buffer {
 	content := []byte("Hello, EROFS!")
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "testdir/hello.txt",
-		Mode:     0644,
+		Mode:     0o644,
 		Size:     int64(len(content)),
 		Typeflag: tar.TypeReg,
 		ModTime:  time.Now(),
@@ -568,7 +568,7 @@ func createTestTar(t *testing.T) *bytes.Buffer {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "testdir/link",
 		Linkname: "hello.txt",
-		Mode:     0777,
+		Mode:     0o777,
 		Typeflag: tar.TypeSymlink,
 		ModTime:  time.Now(),
 	}); err != nil {
@@ -737,7 +737,7 @@ func TestGetBlockSize(t *testing.T) {
 		// Create a file with invalid magic
 		f := filepath.Join(t.TempDir(), "invalid.erofs")
 		data := make([]byte, 2048)
-		if err := os.WriteFile(f, data, 0644); err != nil {
+		if err := os.WriteFile(f, data, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		_, err := GetBlockSize(f)
@@ -818,19 +818,19 @@ func TestConvertErofsIntegration(t *testing.T) {
 
 	// Create a subdirectory
 	subDir := filepath.Join(srcDir, "subdir")
-	if err := os.MkdirAll(subDir, 0755); err != nil {
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
 		t.Fatalf("failed to create subdir: %v", err)
 	}
 
 	// Create a file
 	testFile := filepath.Join(srcDir, "testfile.txt")
-	if err := os.WriteFile(testFile, []byte("Hello, EROFS!"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("Hello, EROFS!"), 0o644); err != nil {
 		t.Fatalf("failed to create testfile: %v", err)
 	}
 
 	// Create a file in subdirectory
 	subFile := filepath.Join(subDir, "subfile.txt")
-	if err := os.WriteFile(subFile, []byte("Nested content"), 0644); err != nil {
+	if err := os.WriteFile(subFile, []byte("Nested content"), 0o644); err != nil {
 		t.Fatalf("failed to create subfile: %v", err)
 	}
 
@@ -892,7 +892,7 @@ func TestConvertErofsWithCompression(t *testing.T) {
 	// Create a larger file to better test compression
 	testFile := filepath.Join(srcDir, "largefile.txt")
 	content := bytes.Repeat([]byte("This is compressible content. "), 1000)
-	if err := os.WriteFile(testFile, content, 0644); err != nil {
+	if err := os.WriteFile(testFile, content, 0o644); err != nil {
 		t.Fatalf("failed to create testfile: %v", err)
 	}
 

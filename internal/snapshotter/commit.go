@@ -53,7 +53,7 @@ func (s *snapshotter) acquireFsmetaLock(ctx context.Context, lockFile, finalFile
 		}
 
 		// Try to create lock file atomically
-		lockFd, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0600)
+		lockFd, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			// We acquired the lock
 			lockFd.Close()
@@ -351,7 +351,7 @@ func fixVmdkPaths(vmdkFile, oldPath, newPath string) error {
 	fixed := strings.ReplaceAll(string(content), oldPath, newPath)
 
 	// Atomic write: write to temp file, then rename
-	if err := atomicWriteFile(vmdkFile, []byte(fixed), 0644); err != nil {
+	if err := atomicWriteFile(vmdkFile, []byte(fixed), 0o644); err != nil {
 		return fmt.Errorf("write vmdk: %w", err)
 	}
 
@@ -414,7 +414,7 @@ func (s *snapshotter) writeLayerManifest(manifestFile string, blobs []string) er
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
-	return atomicWriteFile(manifestFile, []byte(content), 0644)
+	return atomicWriteFile(manifestFile, []byte(content), 0o644)
 }
 
 // Commit finalizes an active snapshot, converting it to EROFS format.

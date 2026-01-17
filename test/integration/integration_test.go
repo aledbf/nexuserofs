@@ -418,7 +418,7 @@ func NewEnvironment(t *testing.T, opts ...EnvOption) *Environment {
 	// Create directories
 	dirs := []string{env.containerdRoot, env.snapshotterRoot, env.logDir}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("create directory %s: %v", dir, err)
 		}
 	}
@@ -563,7 +563,7 @@ root = %q
   snapshotter = "spin-erofs"
 `, e.containerdRoot, e.containerdSocket, e.snapshotterSocket, capabilitiesLine, e.snapshotterSocket)
 
-	return os.WriteFile(configPath, []byte(config), 0644)
+	return os.WriteFile(configPath, []byte(config), 0o644)
 }
 
 // startSnapshotter starts the spin-erofs-snapshotter process.
@@ -1423,14 +1423,14 @@ func testCommitLifecycle(t *testing.T, env *Environment) {
 
 	// Write test data
 	upperDir := filepath.Join(mountPoint, "upper")
-	if err := os.MkdirAll(upperDir, 0755); err != nil {
+	if err := os.MkdirAll(upperDir, 0o755); err != nil {
 		unmountExt4(mountPoint) //nolint:errcheck
 		t.Fatalf("create upper dir: %v", err)
 	}
 
 	testFile := filepath.Join(upperDir, "lifecycle-test.bin")
 	testData := bytes.Repeat([]byte("x"), 1024*1024) // 1MB
-	if err := os.WriteFile(testFile, testData, 0644); err != nil {
+	if err := os.WriteFile(testFile, testData, 0o644); err != nil {
 		unmountExt4(mountPoint) //nolint:errcheck
 		t.Fatalf("write test file: %v", err)
 	}

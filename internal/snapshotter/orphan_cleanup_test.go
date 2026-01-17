@@ -181,13 +181,13 @@ func TestOrphanCleanupRemovesOrphans(t *testing.T) {
 	// Create an orphan directory manually (not in metadata)
 	orphanID := "orphan-12345"
 	orphanDir := filepath.Join(snapshotRoot, "snapshots", orphanID)
-	if err := os.MkdirAll(orphanDir, 0755); err != nil {
+	if err := os.MkdirAll(orphanDir, 0o755); err != nil {
 		t.Fatalf("failed to create orphan directory: %v", err)
 	}
 
 	// Create a file in the orphan directory
 	orphanFile := filepath.Join(orphanDir, "test.txt")
-	if err := os.WriteFile(orphanFile, []byte("orphan"), 0644); err != nil {
+	if err := os.WriteFile(orphanFile, []byte("orphan"), 0o644); err != nil {
 		t.Fatalf("failed to create orphan file: %v", err)
 	}
 

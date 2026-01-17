@@ -85,7 +85,7 @@ func skipIfNoImmutableSupport(t *testing.T, dir string) {
 	t.Helper()
 	// Create a test file to check if FS_IOC_GETFLAGS is supported
 	testFile := filepath.Join(dir, ".immutable-test")
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("test"), 0o644); err != nil {
 		t.Skipf("failed to create test file: %v", err)
 	}
 	defer os.Remove(testFile)
@@ -171,7 +171,7 @@ func (e *snapshotTestEnv) createLayer(key, parentKey, filename, content string) 
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -196,7 +196,7 @@ func (e *snapshotTestEnv) createLayerWithLabels(key, parentKey, filename, conten
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -254,9 +254,9 @@ func createTestTarContent() io.ReadCloser {
 
 	// Create the tar with our test files and directories
 	tarWriter := tartest.TarAll(
-		tc.File("test-file.txt", []byte(testFileContent), 0644),
-		tc.Dir("testdir", 0755),
-		tc.File("testdir/nested.txt", []byte(testNestedFileContent), 0644),
+		tc.File("test-file.txt", []byte(testFileContent), 0o644),
+		tc.Dir("testdir", 0o755),
+		tc.File("testdir/nested.txt", []byte(testNestedFileContent), 0o644),
 	)
 
 	// Return the tar as a ReadCloser
@@ -374,7 +374,7 @@ func createOverlayViewForCompareWithMountedLower(t *testing.T, lowerDir, upperDi
 	// (overlay requires upperdir and workdir to be on the same filesystem)
 	// The upperDir is inside the mounted ext4 at /rw/upper, so workdir goes at /rw/work
 	workdir := filepath.Join(filepath.Dir(upperDir), "work")
-	if err := os.MkdirAll(workdir, 0755); err != nil {
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		t.Fatalf("failed to create workdir: %v", err)
 	}
 
@@ -420,7 +420,7 @@ func mountErofsLayersWithOverlay(t *testing.T, layers []mount.Mount, target stri
 
 	for i, m := range layers {
 		layerDir := filepath.Join(baseDir, fmt.Sprintf("layer%d", i))
-		if err := os.MkdirAll(layerDir, 0755); err != nil {
+		if err := os.MkdirAll(layerDir, 0o755); err != nil {
 			t.Fatalf("failed to create layer dir: %v", err)
 		}
 
@@ -467,7 +467,7 @@ func mountErofsLayersWithOverlay(t *testing.T, layers []mount.Mount, target stri
 	}
 
 	// Ensure target directory exists
-	if err := os.MkdirAll(target, 0755); err != nil {
+	if err := os.MkdirAll(target, 0o755); err != nil {
 		for _, dir := range layerDirs {
 			exec.Command("umount", dir).Run()
 		}

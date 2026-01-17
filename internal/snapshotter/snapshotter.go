@@ -123,7 +123,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		opt(&config)
 	}
 
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create root directory %q: %w", root, err)
 	}
 
@@ -144,7 +144,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, fmt.Errorf("create metadata store: %w", err)
 	}
 
-	if err := os.Mkdir(filepath.Join(root, snapshotsDirName), 0700); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(filepath.Join(root, snapshotsDirName), 0o700); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("create snapshots directory: %w", err)
 	}
 
@@ -213,7 +213,7 @@ func (s *snapshotter) prepareDirectory(snapshotDir string, kind snapshots.Kind) 
 		return "", fmt.Errorf("create temp dir: %w", err)
 	}
 
-	if err := os.Mkdir(filepath.Join(td, fsDirName), 0755); err != nil {
+	if err := os.Mkdir(filepath.Join(td, fsDirName), 0o755); err != nil {
 		return td, err
 	}
 	if kind == snapshots.KindActive {

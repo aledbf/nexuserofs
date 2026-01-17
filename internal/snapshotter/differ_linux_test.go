@@ -180,7 +180,7 @@ func newDifferTestEnvWithBlockMode(t *testing.T) *differTestEnv {
 func (e *differTestEnv) createMountManager() mount.Manager {
 	e.t.Helper()
 
-	db, err := bolt.Open(filepath.Join(e.tempDir, "mounts.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(e.tempDir, "mounts.db"), 0o600, nil)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func (e *differTestEnv) createLayer(key, parentKey, filename, content string) st
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -240,7 +240,7 @@ func (e *differTestEnv) createBlockLayer(key, parentKey, filename, content strin
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -267,7 +267,7 @@ func (e *differTestEnv) prepareActiveLayer(key, parentKey, filename, content str
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -289,7 +289,7 @@ func (e *differTestEnv) prepareActiveBlockLayer(key, parentKey, filename, conten
 
 	id := snapshotID(e.ctx(), e.t, e.snapshotter, extractKey)
 	filePath := filepath.Join(e.snapshotter.blockUpperPath(id), filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		e.t.Fatalf("failed to write %s: %v", filename, err)
 	}
 
@@ -364,7 +364,7 @@ func TestErofsDifferApply(t *testing.T) {
 	t.Cleanup(func() { mount.UnmountRecursive(snapshotRoot, 0) })
 
 	// Create mount manager for EROFS mounts (after snapshotter creates root)
-	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0o600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestErofsDifferApply(t *testing.T) {
 
 	// Mount EROFS directly (containerd mount manager doesn't support EROFS)
 	viewTarget := filepath.Join(tempDir, viewKey)
-	if err := os.MkdirAll(viewTarget, 0755); err != nil {
+	if err := os.MkdirAll(viewTarget, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cleanup := mountErofsView(t, viewMounts, viewTarget)
@@ -591,7 +591,7 @@ func TestErofsDifferComparePreservesWhiteouts(t *testing.T) {
 	// Use blockUpperPath to get the correct directory inside the mounted ext4
 	id := snapshotID(env.ctx(), t, env.snapshotter, extractKey)
 	whiteoutPath := filepath.Join(env.snapshotter.blockUpperPath(id), "gone.txt")
-	if err := unix.Mknod(whiteoutPath, unix.S_IFCHR|0644, 0); err != nil {
+	if err := unix.Mknod(whiteoutPath, unix.S_IFCHR|0o644, 0); err != nil {
 		t.Fatalf("failed to create whiteout at %s: %v", whiteoutPath, err)
 	}
 

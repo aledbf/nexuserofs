@@ -98,7 +98,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 	}
 
 	// Create mount manager for template expansion
-	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(tempDir, "mounts.db"), 0o600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestErofsSnapshotCommitApplyFlow(t *testing.T) {
 
 	writeFiles := func(dir string, files map[string]string) error {
 		for name, content := range files {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 				return err
 			}
 		}
@@ -390,7 +390,7 @@ func TestErofsCommitWithoutHostMount(t *testing.T) {
 	baseID := snapshotID(ctx, t, snap, baseKey)
 
 	// Write some files to the base layer
-	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(baseID), "base.txt"), []byte("base"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(snap.blockUpperPath(baseID), "base.txt"), []byte("base"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -419,7 +419,7 @@ func TestErofsCommitWithoutHostMount(t *testing.T) {
 	}
 
 	// Simulate VM operation: manually mount the ext4, write files, unmount
-	if err := os.MkdirAll(rwMountPath, 0755); err != nil {
+	if err := os.MkdirAll(rwMountPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := mount.Mount{
@@ -433,11 +433,11 @@ func TestErofsCommitWithoutHostMount(t *testing.T) {
 
 	// Create upper dir and write a file
 	upperPath := snap.blockUpperPath(vmID)
-	if err := os.MkdirAll(upperPath, 0755); err != nil {
+	if err := os.MkdirAll(upperPath, 0o755); err != nil {
 		mount.UnmountAll(rwMountPath, 0)
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(upperPath, "vm-file.txt"), []byte("vm-data"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(upperPath, "vm-file.txt"), []byte("vm-data"), 0o644); err != nil {
 		mount.UnmountAll(rwMountPath, 0)
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestErofsSnapshotterFsmetaSingleLayerView(t *testing.T) {
 
 		id := snapshotID(ctx, t, snap, key)
 		filename := fmt.Sprintf("file-%d.txt", i)
-		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(snap.blockUpperPath(id), filename), []byte(fmt.Sprintf("content-%d", i)), 0o644); err != nil {
 			t.Fatalf("failed to write file in layer %d: %v", i, err)
 		}
 
@@ -646,7 +646,7 @@ func TestErofsCleanupRemovesOrphan(t *testing.T) {
 
 	// Create an orphan snapshot directory not tracked by metadata.
 	orphanDir := filepath.Join(env.snapshotter.root, "snapshots", "orphan")
-	if err := os.MkdirAll(filepath.Join(orphanDir, "fs"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(orphanDir, "fs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1214,7 +1214,7 @@ func TestErofsBlockModeExtractWithParent(t *testing.T) {
 
 	// Write content to verify it's writable
 	testFile := filepath.Join(m.Source, "extract-test.txt")
-	if err := os.WriteFile(testFile, []byte("extract content"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("extract content"), 0o644); err != nil {
 		t.Fatalf("failed to write to extract mount: %v", err)
 	}
 
@@ -1262,7 +1262,7 @@ func TestErofsBlockModeExtractWithMultipleParents(t *testing.T) {
 
 	// Write content and verify
 	testFile := filepath.Join(m.Source, "extract-multi.txt")
-	if err := os.WriteFile(testFile, []byte("multi-parent extract"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("multi-parent extract"), 0o644); err != nil {
 		t.Fatalf("failed to write to extract mount: %v", err)
 	}
 

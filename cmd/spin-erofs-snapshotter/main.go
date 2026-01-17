@@ -142,13 +142,13 @@ func run(cliCtx *cli.Context) error {
 	containerdNamespace := cliCtx.String("containerd-namespace")
 
 	// Ensure root directory exists
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("failed to create root directory: %w", err)
 	}
 
 	// Ensure socket directory exists
 	socketDir := filepath.Dir(address)
-	if err := os.MkdirAll(socketDir, 0700); err != nil {
+	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
@@ -189,7 +189,7 @@ func run(cliCtx *cli.Context) error {
 	var differOpts []differ.DifferOpt
 
 	dbPath := filepath.Join(root, "mounts.db")
-	db, err := bolt.Open(dbPath, 0600, nil)
+	db, err := bolt.Open(dbPath, 0o600, nil)
 	if err != nil {
 		return fmt.Errorf("failed to open mount database: %w", err)
 	}

@@ -126,7 +126,7 @@ func Setup(backingFile string, cfg Config) (*Device, error) {
 // Returns an error if the sysfs attribute doesn't exist or isn't writable.
 func (d *Device) SetSerial(serial string) error {
 	sysfsPath := fmt.Sprintf("/sys/block/loop%d/loop/serial", d.Number)
-	return os.WriteFile(sysfsPath, []byte(serial), 0644)
+	return os.WriteFile(sysfsPath, []byte(serial), 0o644)
 }
 
 // GetSerial reads the serial number from a loop device via sysfs.

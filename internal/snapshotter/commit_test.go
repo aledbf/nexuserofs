@@ -17,7 +17,7 @@ func TestGetCommitUpperDir(t *testing.T) {
 		// Create snapshot directory without rwlayer.img
 		snapshotDir := filepath.Join(root, "snapshots", "test-id")
 		fsDir := filepath.Join(snapshotDir, "fs")
-		if err := os.MkdirAll(fsDir, 0755); err != nil {
+		if err := os.MkdirAll(fsDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -38,12 +38,12 @@ func TestGetCommitUpperDir(t *testing.T) {
 		snapshotDir := filepath.Join(root, "snapshots", "test-id")
 		rwDir := filepath.Join(snapshotDir, "rw")
 		upperDir := filepath.Join(rwDir, "upper")
-		if err := os.MkdirAll(upperDir, 0755); err != nil {
+		if err := os.MkdirAll(upperDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
 		rwLayer := filepath.Join(snapshotDir, "rwlayer.img")
-		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0644); err != nil {
+		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -62,17 +62,17 @@ func TestGetCommitUpperDir(t *testing.T) {
 		// Create snapshot directory with rwlayer.img and rw/ with some content
 		snapshotDir := filepath.Join(root, "snapshots", "test-id")
 		rwDir := filepath.Join(snapshotDir, "rw")
-		if err := os.MkdirAll(rwDir, 0755); err != nil {
+		if err := os.MkdirAll(rwDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
 		// Add content to rw/ to simulate a mounted filesystem
-		if err := os.WriteFile(filepath.Join(rwDir, "somefile"), []byte("data"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(rwDir, "somefile"), []byte("data"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
 		rwLayer := filepath.Join(snapshotDir, "rwlayer.img")
-		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0644); err != nil {
+		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -92,15 +92,15 @@ func TestGetCommitUpperDir(t *testing.T) {
 		snapshotDir := filepath.Join(root, "snapshots", "test-id")
 		fsDir := filepath.Join(snapshotDir, "fs")
 		rwDir := filepath.Join(snapshotDir, "rw")
-		if err := os.MkdirAll(fsDir, 0755); err != nil {
+		if err := os.MkdirAll(fsDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(rwDir, 0755); err != nil {
+		if err := os.MkdirAll(rwDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
 		rwLayer := filepath.Join(snapshotDir, "rwlayer.img")
-		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0644); err != nil {
+		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -119,12 +119,12 @@ func TestGetCommitUpperDir(t *testing.T) {
 		// Create snapshot directory with rwlayer.img but no rw/ directory
 		snapshotDir := filepath.Join(root, "snapshots", "test-id")
 		fsDir := filepath.Join(snapshotDir, "fs")
-		if err := os.MkdirAll(fsDir, 0755); err != nil {
+		if err := os.MkdirAll(fsDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
 		rwLayer := filepath.Join(snapshotDir, "rwlayer.img")
-		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0644); err != nil {
+		if err := os.WriteFile(rwLayer, []byte("fake ext4"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 

@@ -116,7 +116,7 @@ func TestNewSnapshotter(t *testing.T) {
 		// Create a file where we want the directory
 		root := t.TempDir()
 		blockerPath := filepath.Join(root, "blocker")
-		if err := os.WriteFile(blockerPath, []byte("x"), 0644); err != nil {
+		if err := os.WriteFile(blockerPath, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 

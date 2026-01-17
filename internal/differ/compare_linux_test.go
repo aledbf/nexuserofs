@@ -323,16 +323,16 @@ func TestCompareWithContentStore(t *testing.T) {
 
 		// Create lower directory with some content
 		lowerDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(lowerDir, "file.txt"), []byte("lower content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(lowerDir, "file.txt"), []byte("lower content"), 0o644); err != nil {
 			t.Fatalf("failed to write lower file: %v", err)
 		}
 
 		// Create upper directory with modified content
 		upperDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(upperDir, "file.txt"), []byte("upper content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(upperDir, "file.txt"), []byte("upper content"), 0o644); err != nil {
 			t.Fatalf("failed to write upper file: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(upperDir, "newfile.txt"), []byte("new content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(upperDir, "newfile.txt"), []byte("new content"), 0o644); err != nil {
 			t.Fatalf("failed to write new file: %v", err)
 		}
 
@@ -376,7 +376,7 @@ func TestCompareWithContentStore(t *testing.T) {
 
 		// Create identical directories
 		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0o644); err != nil {
 			t.Fatalf("failed to write file: %v", err)
 		}
 

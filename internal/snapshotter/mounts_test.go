@@ -29,12 +29,12 @@ func TestMultiLayerMountsFallbackToIndividualLayers(t *testing.T) {
 
 	for _, pid := range parentIDs {
 		snapshotDir := filepath.Join(root, "snapshots", pid)
-		if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		// Create layer blob with digest-based name
 		layerPath := filepath.Join(snapshotDir, "sha256-"+pid+pid+pid+pid+pid+pid+pid+pid+".erofs")
-		if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+		if err := os.WriteFile(layerPath, []byte("fake"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -74,21 +74,21 @@ func TestActiveMountsFallbackToIndividualLayers(t *testing.T) {
 
 	// Create parent snapshot directory with layer blob but NO fsmeta
 	snapshotDir := filepath.Join(root, "snapshots", "parent1")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	layerPath := filepath.Join(snapshotDir, "sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs")
-	if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+	if err := os.WriteFile(layerPath, []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create active snapshot directory with rwlayer.img
 	activeDir := filepath.Join(root, "snapshots", "active")
-	if err := os.MkdirAll(activeDir, 0755); err != nil {
+	if err := os.MkdirAll(activeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rwLayer := filepath.Join(activeDir, "rwlayer.img")
-	if err := os.WriteFile(rwLayer, []byte("fake"), 0644); err != nil {
+	if err := os.WriteFile(rwLayer, []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,7 +132,7 @@ func TestLayerMountsDecisionTree(t *testing.T) {
 
 		// Create snapshot directory
 		snapshotDir := filepath.Join(root, "snapshots", "empty")
-		if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -162,11 +162,11 @@ func TestLayerMountsDecisionTree(t *testing.T) {
 
 		// Create parent with layer blob
 		snapshotDir := filepath.Join(root, "snapshots", "parent1")
-		if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+		if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		layerPath := filepath.Join(snapshotDir, "sha256-a3ed95caeb02ffe68cdd9fd84406680ae93d633cb16422d00e8a7c22955b46d4.erofs")
-		if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+		if err := os.WriteFile(layerPath, []byte("fake"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -201,11 +201,11 @@ func TestLayerMountsDecisionTree(t *testing.T) {
 		parentIDs := []string{"parent2", "parent1"}
 		for _, pid := range parentIDs {
 			snapshotDir := filepath.Join(root, "snapshots", pid)
-			if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+			if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			layerPath := filepath.Join(snapshotDir, "sha256-"+pid+pid+pid+pid+pid+pid+pid+pid+".erofs")
-			if err := os.WriteFile(layerPath, []byte("fake"), 0644); err != nil {
+			if err := os.WriteFile(layerPath, []byte("fake"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -213,7 +213,7 @@ func TestLayerMountsDecisionTree(t *testing.T) {
 		// Create fsmeta and vmdk in newest parent
 		newestDir := filepath.Join(root, "snapshots", "parent2")
 		for _, name := range []string{"fsmeta.erofs", "merged.vmdk"} {
-			if err := os.WriteFile(filepath.Join(newestDir, name), []byte("fake"), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(newestDir, name), []byte("fake"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -245,11 +245,11 @@ func TestActiveSnapshotNoParentsReturnsExt4Only(t *testing.T) {
 
 	// Create snapshot directory with rwlayer.img
 	snapshotDir := filepath.Join(root, "snapshots", "active")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	rwLayer := filepath.Join(snapshotDir, "rwlayer.img")
-	if err := os.WriteFile(rwLayer, []byte("fake"), 0644); err != nil {
+	if err := os.WriteFile(rwLayer, []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,7 +287,7 @@ func TestWritableMountReturnsExt4(t *testing.T) {
 
 	// Create snapshot directory with rwlayer.img
 	snapshotDir := filepath.Join(root, "snapshots", "test")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 

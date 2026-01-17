@@ -364,7 +364,7 @@ func withActiveSnapshotMount(ctx context.Context, mounts []mount.Mount, f func(r
 	overlayDir := filepath.Join(tempBase, "overlay")
 
 	for _, d := range []string{erofsDir, ext4Dir, overlayDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fmt.Errorf("failed to create dir %s: %w", d, err)
 		}
 	}
@@ -400,12 +400,12 @@ func withActiveSnapshotMount(ctx context.Context, mounts []mount.Mount, f func(r
 	if _, err := os.Stat(upperDir); err != nil {
 		// If upper doesn't exist, the container had no changes
 		log.G(ctx).Debug("ext4 upper directory doesn't exist, using empty overlay")
-		if err := os.MkdirAll(upperDir, 0755); err != nil {
+		if err := os.MkdirAll(upperDir, 0o755); err != nil {
 			return fmt.Errorf("failed to create upper dir: %w", err)
 		}
 	}
 	if _, err := os.Stat(workDir); err != nil {
-		if err := os.MkdirAll(workDir, 0755); err != nil {
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			return fmt.Errorf("failed to create work dir: %w", err)
 		}
 	}

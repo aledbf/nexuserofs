@@ -236,12 +236,12 @@ func writeToSnapshot(mounts []mount.Mount, markerFile string) error {
 
 	// Create the marker file
 	markerPath := filepath.Join(mountPoint, markerFile)
-	if err := os.MkdirAll(filepath.Dir(markerPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o755); err != nil {
 		return fmt.Errorf("create parent dirs: %w", err)
 	}
 
 	content := fmt.Sprintf("Committed at %s\n", time.Now().Format(time.RFC3339))
-	if err := os.WriteFile(markerPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(markerPath, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write marker file: %w", err)
 	}
 

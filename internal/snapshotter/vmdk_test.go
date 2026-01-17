@@ -38,7 +38,7 @@ ddb.adapterType = "ide"
 	// Write test VMDK to temp file
 	tmpDir := t.TempDir()
 	vmdkPath := filepath.Join(tmpDir, "test.vmdk")
-	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0644); err != nil {
+	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0o644); err != nil {
 		t.Fatalf("failed to write test vmdk: %v", err)
 	}
 
@@ -113,7 +113,7 @@ ddb.virtualHWVersion = "4"
 
 	tmpDir := t.TempDir()
 	vmdkPath := filepath.Join(tmpDir, "test.vmdk")
-	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0644); err != nil {
+	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0o644); err != nil {
 		t.Fatalf("failed to write test vmdk: %v", err)
 	}
 
@@ -167,7 +167,7 @@ ddb.virtualHWVersion = "4"
 
 	tmpDir := t.TempDir()
 	vmdkPath := filepath.Join(tmpDir, "test.vmdk")
-	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0644); err != nil {
+	if err := os.WriteFile(vmdkPath, []byte(vmdkContent), 0o644); err != nil {
 		t.Fatalf("failed to write test vmdk: %v", err)
 	}
 

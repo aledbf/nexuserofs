@@ -185,7 +185,7 @@ func TestFsmetaLockFileRace(t *testing.T) {
 
 	// Create snapshot directory
 	snapshotDir := filepath.Join(root, "snapshots", "test-parent")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,7 +201,7 @@ func TestFsmetaLockFileRace(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			// Try to create lock file atomically (same pattern as generateFsMeta)
-			f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0600)
+			f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL, 0o600)
 			if err == nil {
 				winners <- id
 				f.Close()
@@ -236,7 +236,7 @@ func TestFsmetaAtomicRename(t *testing.T) {
 
 	// Create snapshot directory
 	snapshotDir := filepath.Join(root, "snapshots", "test-parent")
-	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,10 +246,10 @@ func TestFsmetaAtomicRename(t *testing.T) {
 	tmpVmdk := vmdkPath + ".tmp"
 
 	// Simulate successful generation: create temp files
-	if err := os.WriteFile(tmpMeta, []byte("fsmeta content"), 0644); err != nil {
+	if err := os.WriteFile(tmpMeta, []byte("fsmeta content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tmpVmdk, []byte("vmdk content"), 0644); err != nil {
+	if err := os.WriteFile(tmpVmdk, []byte("vmdk content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -297,7 +297,7 @@ RW 15944 FLAT "/var/lib/snapshots/7/layer1.erofs" 0
 ddb.virtualHWVersion = "4"
 `
 
-	if err := os.WriteFile(vmdkFile, []byte(vmdkContent), 0644); err != nil {
+	if err := os.WriteFile(vmdkFile, []byte(vmdkContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
